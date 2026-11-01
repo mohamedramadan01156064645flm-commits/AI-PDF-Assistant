@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-11-01 16:01:46",
+  "total_questions": 5,
+  "avg_latency_seconds": 0.03,
+  "avg_keyword_recall": 0.4,
+  "page_hit_rate": 1.0,
+  "details": [
+    {
+      "id": "q1",
+      "language": "en",
+      "question": "What is the difference between supervised and unsupervised learning?",
+      "latency_seconds": 0.054,
+      "keyword_recall": 0.8,
+      "page_hit": true,
+      "retrieved_count": 4,
+      "answer_preview": "**[Demo / Grounded Answer Mode]**\n\nBased directly on the retrieved document context [machine_learning_basics.pdf, Page 1..."
+    },
+    {
+      "id": "q2",
+      "language": "en",
+      "question": "What are the common evaluation metrics for classification models?",
+      "latency_seconds": 0.021,
+      "keyword_recall": 0.4,
+      "page_hit": true,
+      "retrieved_count": 2,
+      "answer_preview": "**[Demo / Grounded Answer Mode]**\n\nBased directly on the retrieved document context [machine_learning_basics.pdf, Page 2..."
+    },
+    {
+      "id": "q3",
+      "language": "ar",
+      "question": "ما هو الفرق بين التعلم الخاضع للإشراف وغير الخاضع للإشراف؟",
+      "latency_seconds": 0.032,
+      "keyword_recall": 0.0,
+      "page_hit": true,
+      "retrieved_count": 4,
+      "answer_preview": "**[Demo / Grounded Answer Mode]**\n\nBased directly on the retrieved document context [machine_learning_basics.pdf, Page 1..."
+    },
+    {
+      "id": "q4",
+      "language": "ar",
+      "question": "ما هي شبكات التعلم العميق وكيف تختلف عن النماذج التقليدية؟",
+      "latency_seconds": 0.027,
+      "keyword_recall": 0.0,
+      "page_hit": true,
+      "retrieved_count": 3,
+      "answer_preview": "**[Demo / Grounded Answer Mode]**\n\nBased directly on the retrieved document context [machine_learning_basics.pdf, Page 3..."
+    },
+    {
+      "id": "q5",
+      "language": "en",
+      "question": "What is overfitting and how can it be prevented?",
+      "latency_seconds": 0.016,
+      "keyword_recall": 0.8,
+      "page_hit": true,
+      "retrieved_count": 3,
+      "answer_preview": "**[Demo / Grounded Answer Mode]**\n\nBased directly on the retrieved document context [machine_learning_basics.pdf, Page 2..."
+    }
+  ]
+}

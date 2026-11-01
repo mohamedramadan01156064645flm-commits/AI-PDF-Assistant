@@ -1,0 +1,42 @@
+[
+  {
+    "id": "q1",
+    "language": "en",
+    "question": "What is the difference between supervised and unsupervised learning?",
+    "expected_keywords": ["labels", "labeled data", "unlabeled", "clustering", "classification"],
+    "ground_truth_answer": "Supervised learning uses labeled training data to predict outcomes or classifications, while unsupervised learning discovers patterns and groupings from unlabeled data without predefined answers.",
+    "expected_page": 1
+  },
+  {
+    "id": "q2",
+    "language": "en",
+    "question": "What are the common evaluation metrics for classification models?",
+    "expected_keywords": ["accuracy", "precision", "recall", "f1-score", "roc-auc"],
+    "ground_truth_answer": "Common evaluation metrics include accuracy, precision, recall, F1-score, and ROC-AUC curve.",
+    "expected_page": 2
+  },
+  {
+    "id": "q3",
+    "language": "ar",
+    "question": "ما هو الفرق بين التعلم الخاضع للإشراف وغير الخاضع للإشراف؟",
+    "expected_keywords": ["بيانات مصنفة", "تسميات", "بدون إشراف", "تجميع", "تصنيف"],
+    "ground_truth_answer": "التعلم الخاضع للإشراف يعتمد على بيانات تدريب موسومة بتسميات محددة، بينما التعلم غير الخاضع للإشراف يكتشف الأنماط والعلاقات داخل البيانات غير الموسومة بدون إجابات مسبقة.",
+    "expected_page": 1
+  },
+  {
+    "id": "q4",
+    "language": "ar",
+    "question": "ما هي شبكات التعلم العميق وكيف تختلف عن النماذج التقليدية؟",
+    "expected_keywords": ["طبقات", "شبكات عصبية", "استخراج الخصائص", "بيانات ضخمة"],
+    "ground_truth_answer": "تتكون شبكات التعلم العميق من طبقات عصبية متعددة تستخرج الميزات والخصائص تلقائياً من البيانات دون الحاجة للهندسة اليدوية للميزات.",
+    "expected_page": 3
+  },
+  {
+    "id": "q5",
+    "language": "en",
+    "question": "What is overfitting and how can it be prevented?",
+    "expected_keywords": ["regularization", "dropout", "cross-validation", "training data", "overfit"],
+    "ground_truth_answer": "Overfitting happens when a model learns noise in the training data and performs poorly on unseen data. It is prevented with regularization, cross-validation, and dropout.",
+    "expected_page": 2
+  }
+]
