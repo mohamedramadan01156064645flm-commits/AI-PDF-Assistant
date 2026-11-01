@@ -2,6 +2,10 @@
 (machine_learning_basics.pdf) for immediate testing and demonstration.
 """
 
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 from pathlib import Path
 try:
     import pymupdf  # PyMuPDF 2.0+
@@ -89,5 +93,62 @@ Retrieval-Augmented Generation (RAG) combines dense semantic retrieval with para
     return output_path
 
 
+def generate_deep_learning_pdf(output_path: Path = PDFS_DIR / "deep_learning_guide.pdf") -> Path:
+    """Creates a sample 2-page Deep Learning textbook in PDF format."""
+    doc = pymupdf.open()
+
+    font_path = Path("C:/Windows/Fonts/arial.ttf")
+    font_kwargs = {"fontfile": str(font_path)} if font_path.exists() else {"fontname": "helv"}
+
+    # Page 1: Neural Networks & Architectures
+    page1 = doc.new_page()
+    text_page1 = """DEEP LEARNING: THEORY AND PRACTICAL APPLICATIONS
+Chapter 1: Deep Neural Networks and Architectures
+
+1.1 Artificial Neural Networks (ANN)
+Artificial Neural Networks are computational systems inspired by the biological neural networks that constitute animal brains. An ANN is based on a collection of connected units or nodes called artificial neurons, which loosely model the neurons in a biological brain.
+Each connection can transmit a signal to other neurons. An artificial neuron receives signals then processes them and can signal neurons connected to it.
+
+1.2 Convolutional Neural Networks (CNN)
+Convolutional Neural Networks are specialized deep neural networks designed primarily for visual data processing:
+- Convolutional Layers: Apply learnable filters (kernels) across input tensors to create feature maps.
+- Pooling Layers: Downsample feature maps to reduce spatial dimensions, ensuring translation invariance (Max Pooling, Average Pooling).
+- Fully Connected Layers: Map extracted high-level features to target class probabilities using Softmax activation.
+Applications include image classification, object detection (YOLO, Faster R-CNN), and medical image analysis.
+
+1.3 Recurrent Neural Networks and LSTMs
+Recurrent Neural Networks (RNN) process sequential data by maintaining an internal hidden state memory across time steps. Long Short-Term Memory (LSTM) networks address the vanishing gradient problem using input, forget, and output gating mechanisms.
+"""
+    page1.insert_text((50, 50), text_page1, fontsize=10, **font_kwargs)
+
+    # Page 2: LLMs and Retrieval Augmented Generation
+    page2 = doc.new_page()
+    text_page2 = """DEEP LEARNING: THEORY AND PRACTICAL APPLICATIONS
+Chapter 2: Large Language Models and Retrieval Augmented Generation
+
+2.1 Large Language Models (LLMs)
+Large Language Models such as GPT-4, Gemini, and Claude are trained on trillions of tokens using causal language modeling objectives. They demonstrate remarkable zero-shot reasoning, code generation, and semantic comprehension.
+
+2.2 Retrieval-Augmented Generation (RAG) Architecture
+Retrieval-Augmented Generation (RAG) bridges the gap between static LLM knowledge and dynamic external data:
+1. Ingestion: Documents are loaded, parsed, and partitioned into semantically coherent text chunks.
+2. Embedding: Dense vector representations are computed using embedding models (e.g., MiniLM, BGE, Text-Embedding-004).
+3. Vector Storage: ChromaDB, FAISS, or Pinecone index embedding vectors with metadata for sub-millisecond retrieval.
+4. Semantic Retrieval: Cosine similarity identifies the most relevant context chunks for any user question.
+5. Grounded Generation: The LLM receives retrieved context chunks along with the user prompt to synthesize factual, hallucination-free answers with page citations.
+
+مقدمة في الذكاء الاصطناعي التوليدي والتعلم العميق:
+تعتمد النماذج اللغوية الكبيرة على معمارية المحولات (Transformers) لتقديم إجابات ذكية ودقيقة.
+"""
+    page2.insert_text((50, 50), text_page2, fontsize=10, **font_kwargs)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(output_path))
+    doc.close()
+    print(f"✅ Generated sample Deep Learning PDF at: {output_path}")
+    return output_path
+
+
 if __name__ == "__main__":
     generate_sample_pdf()
+    generate_deep_learning_pdf()
