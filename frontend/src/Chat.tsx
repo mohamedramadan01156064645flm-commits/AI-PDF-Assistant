@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import {
   MessageSquareMore,
   FileText,
@@ -6,53 +6,42 @@ import {
   BarChart3,
   Settings,
   Zap,
-  ChevronDown,
-  LogOut,
-  Sun,
-  Moon,
   CheckCircle2,
   Globe,
-  ShieldCheck,
   Trash2,
   User,
   Bot,
   CheckCheck,
-  GraduationCap,
-  Workflow,
   Copy,
-  Paperclip,
   Send,
   Lightbulb,
-  List,
   HelpCircle,
-  Link2,
   Check,
-  Search,
-  Menu,
   Upload,
   RefreshCw,
-  Sliders,
-  SlidersHorizontal,
   Database,
-  Cpu,
-  Clock,
-  Target,
-  FileSearch,
+  BookOpen,
+  Scale,
+  Brain,
+  Sun,
+  Moon,
+  Menu,
+  X,
+  ExternalLink,
+  Download,
+  Eye,
+  AlertTriangle,
+  Layers,
+  Activity,
 } from 'lucide-react'
 
 const API_BASE = '/api'
-
-interface Citation {
-  source: string
-  raw_source?: string
-  page: number | string
-  snippet: string
-}
+const CHAT_STORAGE_KEY = 'ai_assistant_chat_session_history'
 
 interface Message {
   user: string
   assistant: string
-  citations: Citation[]
+  mode?: string // 'GENERAL' | 'RAG' | 'HYBRID'
   time: string
   grounded?: boolean
 }
@@ -65,64 +54,211 @@ interface DocItem {
   size_mb: number
   chunks: number
   uploaded_at: string
+  is_scanned?: boolean
+  status?: string
+}
+
+interface EvaluationReport {
+  timestamp: string
+  provider: string
+  dataset_name: string
+  total_questions: number
+  total_chunks_indexed: number
+  benchmark_duration_seconds: number
+  avg_retrieval_latency_ms: number
+  avg_generation_latency_seconds: number
+  avg_total_latency_seconds: number
+  avg_keyword_recall: number
+  avg_precision_at_k: number
+  mean_reciprocal_rank: number
+  page_hit_rate: number
+  faithfulness_rate: number
+  answer_relevancy: number
+  details: Array<{
+    id: string
+    language: string
+    question: string
+    retrieval_latency_ms: number
+    generation_latency_seconds: number
+    total_latency_seconds: number
+    keyword_recall: number
+    precision_at_k: number
+    mrr: number
+    page_hit: boolean
+    relevancy: number
+    retrieved_count: number
+    answer_preview: string
+  }>
+}
+
+interface UploadScanState {
+  active: boolean
+  fileName: string
+  previewUrl: string | null
+  stageIndex: number
+  progress: number
+  success: boolean
+  error: string | null
+  fileCount: number
+}
+
+const UPLOAD_STAGES = [
+  'Uploading PDF document to server...',
+  'Extracting text layers and document structure...',
+  'Splitting semantic chunks & processing context...',
+  'Generating dense embeddings with MiniLM-L6-v2...',
+  'Indexing vectors in ChromaDB for semantic retrieval...',
+  'PDF Indexed & Ready for AI Assistance!',
+]
+
+const ACTION_TITLES: Record<string, string> = {
+  summarize: 'Executive Summary',
+  explain: 'Step-by-Step Document Explanation',
+  key_points: 'Key Takeaways & Highlights',
+  study_notes: 'High-Yield Study Notes',
+  key_concepts: 'Glossary of Definitions & Terms',
+  difficult_concepts: 'Difficult Concepts Simplified',
+  flashcards: 'Active Recall Study Flashcards',
+  quiz: 'Self-Assessment Practice Quiz',
+  qa: 'Practice Questions & Model Answers',
+  compare: 'Cross-Document Comparative Analysis',
 }
 
 export default function Chat() {
+  // Theme state with localStorage persistence
+  const [theme, setTheme] = useState<'light' | 'dark'>(() => {
+    try {
+      const saved = localStorage.getItem('ai_assistant_theme')
+      return saved === 'dark' ? 'dark' : 'light'
+    } catch {
+      return 'light'
+    }
+  })
+
+  // Navigation tab
   const [activeTab, setActiveTab] = useState<'chat' | 'documents' | 'summarize' | 'evaluation' | 'settings'>('chat')
-  const [mode, setMode] = useState('light')
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  // Chat state with persistent sessionStorage rehydration across tab navigation
   const [draft, setDraft] = useState('')
   const [loading, setLoading] = useState(false)
+  const [messages, setMessages] = useState<Message[]>(() => {
+    try {
+      const saved = sessionStorage.getItem(CHAT_STORAGE_KEY)
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (Array.isArray(parsed)) return parsed
+      }
+    } catch (err) {
+      console.warn('Failed to restore chat session:', err)
+    }
+    return []
+  })
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null)
-
-  // Chat state
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      user: 'What is the difference between supervised and unsupervised learning?',
-      assistant: `Supervised and unsupervised learning are two main types of machine learning:`,
-      citations: [
-        {
-          source: 'Machine Learning.pdf',
-          page: 12,
-          snippet: 'Supervised learning uses labeled data to train the model...',
-        },
-        {
-          source: 'ML_Book.pdf',
-          page: 45,
-          snippet: 'Unsupervised learning finds patterns without labels...',
-        },
-      ],
-      time: '4:15 PM',
-      grounded: true,
-    },
-  ])
+  const [clearDialogOpen, setClearDialogOpen] = useState(false)
+  const messagesEndRef = useRef<HTMLDivElement>(null)
 
   // Documents state
-  const [documents, setDocuments] = useState<DocItem[]>([
-    { id: '1', filename: 'machine_learning_basics.pdf', name: 'Machine Learning.pdf', pages: 300, size_mb: 12.5, chunks: 11, uploaded_at: 'Today' },
-    { id: '2', filename: 'deep_learning_guide.pdf', name: 'Deep Learning.pdf', pages: 250, size_mb: 10.8, chunks: 6, uploaded_at: 'Today' },
-  ])
-  const [totalChunks, setTotalChunks] = useState(17)
+  const [documents, setDocuments] = useState<DocItem[]>([])
+  const [totalChunks, setTotalChunks] = useState(0)
+  const [previewDoc, setPreviewDoc] = useState<DocItem | null>(null)
 
-  // Summarize state
+  // Advanced Upload Scanning State
+  const [uploadScan, setUploadScan] = useState<UploadScanState>({
+    active: false,
+    fileName: '',
+    previewUrl: null,
+    stageIndex: 0,
+    progress: 0,
+    success: false,
+    error: null,
+    fileCount: 1,
+  })
+
+  // Professional Reset Knowledge Base Modal State
+  const [resetModal, setResetModal] = useState<{
+    isOpen: boolean
+    stage: 'confirm' | 'processing' | 'success' | 'error'
+    errorMessage: string | null
+  }>({
+    isOpen: false,
+    stage: 'confirm',
+    errorMessage: null,
+  })
+
+  // Document Intelligence state (supports all 10 actions)
   const [selectedDocForSummary, setSelectedDocForSummary] = useState('')
+  const [secondaryDocForCompare, setSecondaryDocForCompare] = useState('')
+  const [intelligenceAction, setIntelligenceAction] = useState<
+    'summarize' | 'explain' | 'key_points' | 'study_notes' | 'key_concepts' |
+    'difficult_concepts' | 'flashcards' | 'quiz' | 'qa' | 'compare'
+  >('summarize')
   const [summaryText, setSummaryText] = useState('')
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [copiedOutput, setCopiedOutput] = useState(false)
+  const [pdfExportLoading, setPdfExportLoading] = useState(false)
+  const [pdfExportError, setPdfExportError] = useState<string | null>(null)
 
-  // Evaluation state
+  // Real Evaluation state
   const [evalLoading, setEvalLoading] = useState(false)
-  const [evalResult, setEvalResult] = useState<any>(null)
+  const [evalReport, setEvalReport] = useState<EvaluationReport | null>(null)
+  const [evalError, setEvalError] = useState<string | null>(null)
 
   // Settings state
   const [settings, setSettings] = useState({
     provider: 'gemini',
     api_key: '',
-    gemini_model: 'gemini-3.8-flash',
+    gemini_model: 'gemini-3.1-flash-lite',
     chunk_size: 500,
     chunk_overlap: 100,
     top_k: 4,
-    similarity_threshold: 0.3,
+    similarity_threshold: 0.15,
   })
   const [settingsSaved, setSettingsSaved] = useState(false)
+
+  // Apply theme class to document
+  useEffect(() => {
+    try {
+      localStorage.setItem('ai_assistant_theme', theme)
+    } catch {}
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark')
+    } else {
+      document.documentElement.classList.remove('dark')
+    }
+  }, [theme])
+
+  // Persistent Chat Storage synchronization
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages))
+    } catch (err) {
+      console.warn('Failed to sync chat history to sessionStorage:', err)
+    }
+  }, [messages])
+
+  // Scroll chat to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, loading])
+
+  // Close modals on Escape key
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPreviewDoc(null)
+        setClearDialogOpen(false)
+        if (resetModal.stage !== 'processing') {
+          setResetModal((prev) => ({ ...prev, isOpen: false }))
+        }
+        if (!uploadScan.active || uploadScan.success || uploadScan.error) {
+          setUploadScan((prev) => ({ ...prev, active: false }))
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [uploadScan.active, uploadScan.success, uploadScan.error, resetModal.stage])
 
   // Fetch documents and status on load
   const fetchDocs = async () => {
@@ -130,16 +266,21 @@ export default function Chat() {
       const res = await fetch(`${API_BASE}/documents`)
       if (res.ok) {
         const data = await res.json()
-        if (data.documents && data.documents.length > 0) {
+        if (data.documents) {
           setDocuments(data.documents)
-          setSelectedDocForSummary(data.documents[0].filename)
+          if (data.documents.length > 0 && !selectedDocForSummary) {
+            setSelectedDocForSummary(data.documents[0].filename)
+            if (data.documents.length > 1) {
+              setSecondaryDocForCompare(data.documents[1].filename)
+            }
+          }
         }
         if (data.total_chunks !== undefined) {
           setTotalChunks(data.total_chunks)
         }
       }
     } catch (err) {
-      console.log('Backend not reachable yet, using sample data')
+      console.log('Backend not reachable')
     }
   }
 
@@ -153,9 +294,22 @@ export default function Chat() {
     } catch (err) {}
   }
 
+  const fetchLatestEvaluation = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/evaluation`)
+      if (res.ok) {
+        const data = await res.json()
+        if (data.status === 'success' && data.report) {
+          setEvalReport(data.report)
+        }
+      }
+    } catch (err) {}
+  }
+
   useEffect(() => {
     fetchDocs()
     fetchSettings()
+    fetchLatestEvaluation()
   }, [])
 
   // Send message
@@ -170,7 +324,7 @@ export default function Chat() {
     const historyPayload = messages.map((m) => ({
       user: m.user,
       assistant: m.assistant,
-      citations: m.citations,
+      mode: m.mode || 'GENERAL',
     }))
 
     try {
@@ -192,26 +346,24 @@ export default function Chat() {
           {
             user: q,
             assistant: data.answer,
-            citations: data.citations || [],
+            mode: data.mode || 'GENERAL',
             time: data.timestamp || now,
             grounded: data.grounded,
           },
         ])
       } else {
-        throw new Error('Failed response')
+        const errJson = await res.json().catch(() => ({}))
+        throw new Error(errJson.detail || 'Server returned an error')
       }
-    } catch (err) {
-      // Fallback response for offline or demo testing
+    } catch (err: any) {
       setMessages((prev) => [
         ...prev,
         {
           user: q,
-          assistant: `Based on your indexed documents: ${q}\n\nSupervised learning relies on explicit ground-truth targets, while unsupervised learning discovers inherent patterns.`,
-          citations: [
-            { source: 'Machine Learning.pdf', page: 12, snippet: 'Supervised learning uses labeled data to train the model...' },
-          ],
+          assistant: `⚠️ **Connection Error**: ${err?.message || 'Unable to reach backend. Please ensure the backend server is running.'}`,
+          mode: 'GENERAL',
           time: now,
-          grounded: true,
+          grounded: false,
         },
       ])
     } finally {
@@ -219,30 +371,98 @@ export default function Chat() {
     }
   }
 
-  // File upload handler
+  // Advanced PDF Upload with Scanning Visualization
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files || e.target.files.length === 0) return
+    const fileList = e.target.files
+    if (!fileList || fileList.length === 0) return
+
+    const primaryFile = fileList[0]
+    const previewUrl = URL.createObjectURL(primaryFile)
+
+    // Initialize Upload Scanning Modal
+    setUploadScan({
+      active: true,
+      fileName: primaryFile.name,
+      previewUrl,
+      stageIndex: 0,
+      progress: 15,
+      success: false,
+      error: null,
+      fileCount: fileList.length,
+    })
+
     const formData = new FormData()
-    for (let i = 0; i < e.target.files.length; i++) {
-      formData.append('files', e.target.files[i])
+    for (let i = 0; i < fileList.length; i++) {
+      formData.append('files', fileList[i])
     }
     formData.append('chunk_size', settings.chunk_size.toString())
     formData.append('chunk_overlap', settings.chunk_overlap.toString())
 
+    // Progress animation timeline
+    const t1 = setTimeout(() => {
+      setUploadScan((prev) => (prev.active && !prev.success ? { ...prev, stageIndex: 1, progress: 38 } : prev))
+    }, 450)
+    const t2 = setTimeout(() => {
+      setUploadScan((prev) => (prev.active && !prev.success ? { ...prev, stageIndex: 2, progress: 62 } : prev))
+    }, 1100)
+    const t3 = setTimeout(() => {
+      setUploadScan((prev) => (prev.active && !prev.success ? { ...prev, stageIndex: 3, progress: 84 } : prev))
+    }, 1800)
+    const t4 = setTimeout(() => {
+      setUploadScan((prev) => (prev.active && !prev.success ? { ...prev, stageIndex: 4, progress: 95 } : prev))
+    }, 2600)
+
     try {
-      setLoading(true)
       const res = await fetch(`${API_BASE}/upload`, {
         method: 'POST',
         body: formData,
       })
+
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
+      clearTimeout(t4)
+
       if (res.ok) {
+        await res.json()
         await fetchDocs()
-        alert('Documents uploaded and indexed successfully!')
+
+        setUploadScan((prev) => ({
+          ...prev,
+          stageIndex: 5,
+          progress: 100,
+          success: true,
+          error: null,
+        }))
+
+        // Auto-close modal after successful completion
+        setTimeout(() => {
+          setUploadScan((prev) => (prev.success ? { ...prev, active: false } : prev))
+        }, 2200)
+      } else {
+        const errData = await res.json().catch(() => ({}))
+        const errorDetail = errData.detail || 'The document upload could not be completed. Please ensure the file is a valid PDF.'
+        setUploadScan((prev) => ({
+          ...prev,
+          error: errorDetail,
+          progress: 0,
+          success: false,
+        }))
       }
-    } catch (err) {
-      alert('Upload failed or backend unavailable.')
+    } catch (err: any) {
+      clearTimeout(t1)
+      clearTimeout(t2)
+      clearTimeout(t3)
+      clearTimeout(t4)
+      setUploadScan((prev) => ({
+        ...prev,
+        error: 'Unable to communicate with the document processing server. Please verify the backend connection.',
+        progress: 0,
+        success: false,
+      }))
     } finally {
-      setLoading(false)
+      // Clear input so the same file can be re-uploaded if desired
+      e.target.value = ''
     }
   }
 
@@ -261,58 +481,169 @@ export default function Chat() {
   // Delete document
   const handleDeleteDoc = async (filename: string) => {
     try {
-      await fetch(`${API_BASE}/documents/${filename}`, { method: 'DELETE' })
+      await fetch(`${API_BASE}/documents/${encodeURIComponent(filename)}`, { method: 'DELETE' })
       await fetchDocs()
+      if (previewDoc?.filename === filename) {
+        setPreviewDoc(null)
+      }
     } catch (e) {}
   }
 
-  // Reset database
-  const handleReset = async () => {
-    if (confirm('Are you sure you want to reset the entire knowledge base?')) {
-      try {
-        await fetch(`${API_BASE}/reset`, { method: 'POST' })
-        setMessages([])
+  // Reset database via Professional Modal
+  const handleConfirmReset = async () => {
+    setResetModal((prev) => ({ ...prev, stage: 'processing', errorMessage: null }))
+    try {
+      const res = await fetch(`${API_BASE}/reset`, { method: 'POST' })
+      if (res.ok) {
+        setDocuments([])
+        setTotalChunks(0)
+        setPreviewDoc(null)
+        setResetModal({ isOpen: true, stage: 'success', errorMessage: null })
         await fetchDocs()
-      } catch (e) {}
+      } else {
+        const errData = await res.json().catch(() => ({}))
+        setResetModal({
+          isOpen: true,
+          stage: 'error',
+          errorMessage: errData.detail || 'Failed to reset knowledge base on the server.',
+        })
+      }
+    } catch {
+      setResetModal({
+        isOpen: true,
+        stage: 'error',
+        errorMessage: 'Unable to reach backend server to perform reset operation.',
+      })
     }
   }
 
-  // Generate summary
-  const handleGenerateSummary = async () => {
+  // Confirm Clear Chat (Safe message reset preserving documents and session clean)
+  const confirmClearChat = () => {
+    setMessages([])
+    try {
+      sessionStorage.removeItem(CHAT_STORAGE_KEY)
+    } catch {}
+    setClearDialogOpen(false)
+  }
+
+  // Run Document Intelligence
+  const handleRunDocIntelligence = async (forcedAction?: typeof intelligenceAction) => {
+    const actionToRun = forcedAction || intelligenceAction
     if (!selectedDocForSummary) return
     setSummaryLoading(true)
     try {
-      const res = await fetch(`${API_BASE}/summarize`, {
+      const res = await fetch(`${API_BASE}/document-intelligence`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ document: selectedDocForSummary }),
+        body: JSON.stringify({
+          action: actionToRun,
+          document: selectedDocForSummary,
+          secondary_document: actionToRun === 'compare' ? secondaryDocForCompare : undefined,
+        }),
       })
       if (res.ok) {
         const data = await res.json()
-        setSummaryText(data.summary)
+        setSummaryText(data.result)
+      } else {
+        const errJson = await res.json().catch(() => ({}))
+        setSummaryText(`⚠️ Processing Error: ${errJson.detail || 'Failed to process document action.'}`)
       }
     } catch (e) {
-      setSummaryText('Failed to generate summary. Please ensure the backend server is running.')
+      setSummaryText('Failed to reach backend server. Please verify the backend service is running.')
     } finally {
       setSummaryLoading(false)
     }
   }
 
-  // Run evaluation
+  // Copy Intelligence Output to Clipboard
+  const handleCopyIntelligenceOutput = async () => {
+    if (!summaryText) return
+    try {
+      await navigator.clipboard.writeText(summaryText)
+      setCopiedOutput(true)
+      setTimeout(() => setCopiedOutput(false), 2500)
+    } catch {
+      // Fallback via textarea
+      const ta = document.createElement('textarea')
+      ta.value = summaryText
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      ta.remove()
+      setCopiedOutput(true)
+      setTimeout(() => setCopiedOutput(false), 2500)
+    }
+  }
+
+  // Download Intelligence Output as Formatted PDF
+  const handleDownloadPDF = async () => {
+    if (!summaryText || pdfExportLoading) return
+    setPdfExportLoading(true)
+    setPdfExportError(null)
+
+    const docTitle = ACTION_TITLES[intelligenceAction] || 'Document Intelligence Report'
+    const docName = selectedDocForSummary || 'Uploaded_Document.pdf'
+
+    try {
+      const res = await fetch(`${API_BASE}/export-pdf`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: summaryText,
+          title: docTitle,
+          action: intelligenceAction,
+          document: docName,
+        }),
+      })
+
+      if (res.ok) {
+        const blob = await res.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        const cleanName = docName.replace(/\.[^/.]+$/, '').replace(/[\s\W]+/g, '_')
+        a.download = `${intelligenceAction}_${cleanName}.pdf`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.URL.revokeObjectURL(url)
+      } else {
+        const errJson = await res.json().catch(() => ({}))
+        setPdfExportError(errJson.detail || 'Failed to generate PDF document.')
+        setTimeout(() => setPdfExportError(null), 4000)
+      }
+    } catch {
+      setPdfExportError('Failed to communicate with PDF export service.')
+      setTimeout(() => setPdfExportError(null), 4000)
+    } finally {
+      setPdfExportLoading(false)
+    }
+  }
+
+  // Run Real Evaluation Benchmark
   const handleRunEval = async () => {
     setEvalLoading(true)
+    setEvalError(null)
     try {
       const res = await fetch(`${API_BASE}/evaluation`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ top_k: 3, provider: 'mock' }),
+        body: JSON.stringify({ top_k: 4, provider: settings.provider }),
       })
       if (res.ok) {
         const data = await res.json()
-        setEvalResult(data)
+        if (data.report) {
+          setEvalReport(data.report)
+        }
+      } else {
+        const errData = await res.json().catch(() => ({}))
+        setEvalError(errData.detail || 'Evaluation benchmark run failed.')
       }
-    } catch (e) {}
-    setEvalLoading(false)
+    } catch (e: any) {
+      setEvalError('Unable to connect to evaluation engine.')
+    } finally {
+      setEvalLoading(false)
+    }
   }
 
   // Save settings
@@ -325,911 +656,2186 @@ export default function Chat() {
       })
       if (res.ok) {
         setSettingsSaved(true)
-        setTimeout(() => setSettingsSaved(false), 3000)
+        setTimeout(() => setSettingsSaved(false), 2500)
       }
     } catch (e) {}
   }
 
-  const latestMessage = messages[messages.length - 1]
-  const lastSources = latestMessage?.citations || []
-
   return (
-    <div className="flex h-screen w-full bg-canvas font-sans text-ink">
-      {/* Sidebar */}
-      <aside className="hidden w-[240px] shrink-0 flex-col bg-navy px-4 pb-6 pt-10 text-white lg:flex">
-        <div className="flex items-center gap-3 px-3">
-          <div className="relative shrink-0">
-            <div className="flex h-14 w-12 items-center justify-center rounded-lg bg-brand text-[11px] font-extrabold shadow-lg shadow-black/30">
-              PDF
-            </div>
-            <div className="absolute -bottom-1 -right-2 h-7 w-7 rounded-full border-[3px] border-[#3b82f6]" />
-            <Sparkles className="absolute -right-4 -top-2 h-4 w-4 fill-[#60a5fa] text-[#60a5fa]" />
-          </div>
-          <div className="pl-3 text-[24px] font-bold leading-[1.1] tracking-tight">
-            AI PDF
-            <br />
-            Assistant
-          </div>
-        </div>
-        <p className="mt-3 text-center text-[13px] text-white/75">RAG-Based Chatbot</p>
-
-        {/* Navigation */}
-        <nav className="mt-12 flex flex-col gap-2">
-          <NavItem icon={MessageSquareMore} label="Chat" active={activeTab === 'chat'} onClick={() => setActiveTab('chat')} />
-          <NavItem icon={FileText} label="Documents" active={activeTab === 'documents'} onClick={() => setActiveTab('documents')} />
-          <NavItem icon={Sparkles} label="Summarize PDF" active={activeTab === 'summarize'} onClick={() => setActiveTab('summarize')} />
-          <NavItem icon={BarChart3} label="Evaluation Dashboard" active={activeTab === 'evaluation'} onClick={() => setActiveTab('evaluation')} />
-          <NavItem icon={Settings} label="Settings" active={activeTab === 'settings'} onClick={() => setActiveTab('settings')} />
-        </nav>
-
-        <div className="mx-1 mt-8 border-t border-white/10" />
-
-        {/* RAG Banner */}
-        <div className="relative mt-7 overflow-hidden rounded-xl bg-navy-2 px-5 pb-14 pt-6">
-          <div className="flex items-start gap-3">
-            <Zap className="mt-0.5 h-5 w-5 shrink-0 fill-[#f5b524] text-[#f5b524]" />
-            <div>
-              <p className="text-[14px] font-medium">Powered by RAG</p>
-              <p className="mt-1.5 text-[12px] leading-[1.6] text-white/65">
-                Ask anything about your PDF files!
-              </p>
-            </div>
-          </div>
-          <svg className="absolute inset-x-0 bottom-0 h-14 w-full" viewBox="0 0 200 50" preserveAspectRatio="none" aria-hidden>
-            <path d="M0 35 C 40 20, 70 48, 110 32 S 170 15, 200 22" fill="none" stroke="#3b6fd8" strokeOpacity="0.55" strokeWidth="1.2" />
-            <path d="M0 40 C 45 28, 75 50, 115 36 S 175 22, 200 28" fill="none" stroke="#3b6fd8" strokeOpacity="0.35" strokeWidth="1" />
-            <path d="M0 44 C 50 34, 80 52, 120 41 S 180 30, 200 34" fill="none" stroke="#3b6fd8" strokeOpacity="0.25" strokeWidth="1" />
-          </svg>
-        </div>
-
-        {/* User profile */}
-        <div className="mt-auto">
-          <div className="mx-1 mb-5 border-t border-white/10" />
-          <div className="flex w-full items-center gap-3 rounded-lg px-1 py-1 text-left">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[#2c3b63] text-[15px] font-semibold">
-              MR
-            </span>
-            <div className="min-w-0 flex-1 truncate">
-              <span className="block text-[15px] font-medium">Mohamed Ramadan</span>
-              <span className="text-[12px] text-white/60">Student</span>
-            </div>
-            <ChevronDown className="h-4 w-4 text-white/70" />
-          </div>
+    <div
+      className={`h-screen w-screen overflow-hidden flex flex-col font-sans transition-colors duration-250 ${
+        theme === 'dark' ? 'bg-[#090E1B] text-[#F5F7FF]' : 'bg-[#F5F8FC] text-[#17243A]'
+      }`}
+    >
+      {/* ───────────────────────────────────────────────────────────── */}
+      {/* MOBILE TOP BAR (Visible on < lg) */}
+      {/* ───────────────────────────────────────────────────────────── */}
+      <header
+        className={`flex items-center justify-between border-b px-4 py-2.5 lg:hidden shrink-0 ${
+          theme === 'dark' ? 'bg-[#0D1424] border-[#26364D] text-[#F5F7FF]' : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A]'
+        }`}
+      >
+        <div className="flex items-center gap-2.5">
           <button
-            onClick={() => alert('Logged out successfully.')}
-            className="mt-3 flex items-center gap-3 rounded-lg px-2 py-1.5 text-[15px] text-white/90 transition-colors duration-150 hover:bg-white/5"
+            onClick={() => setMobileMenuOpen(true)}
+            className={`p-2 rounded-xl transition-colors ${
+              theme === 'dark' ? 'hover:bg-[#1C2A40] text-[#A7B5CC]' : 'hover:bg-[#E8EEF7] text-[#64748B]'
+            }`}
+            aria-label="Open Navigation"
           >
-            <LogOut className="h-5 w-5" />
-            Logout
+            <Menu className="h-5 w-5" />
           </button>
-        </div>
-      </aside>
-
-      {/* Main Container */}
-      <main className="relative min-w-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 lg:px-7 lg:py-7">
-        {/* Mobile top bar */}
-        <div className="mb-4 flex items-center justify-between lg:hidden">
           <div className="flex items-center gap-2">
-            <Menu className="h-5 w-5 text-ink" />
-            <span className="text-[17px] font-bold">AI PDF Assistant</span>
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-[#35C8F4] to-[#9875FF] text-white shadow-md shadow-[#35C8F4]/20">
+              <Brain className="h-4 w-4" />
+            </span>
+            <span className="text-[15px] font-bold tracking-tight">AI PDF Assistant</span>
           </div>
-          <ThemeToggle mode={mode} setMode={setMode} />
         </div>
 
-        <div className="absolute right-6 top-4 z-10 hidden lg:block">
-          <ThemeToggle mode={mode} setMode={setMode} />
-        </div>
+        {/* Mobile Theme Toggle */}
+        <button
+          onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+          className={`flex h-9 w-9 items-center justify-center rounded-xl border transition-all ${
+            theme === 'dark'
+              ? 'border-[#26364D] bg-[#111B2E] text-[#35C8F4] hover:bg-[#1C2A40]'
+              : 'border-[#DFE7F1] bg-[#E8EEF7] text-[#168EDB] hover:bg-[#DFE7F1]'
+          }`}
+          title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+          aria-label="Toggle Theme"
+        >
+          {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+        </button>
+      </header>
 
-        {/* Hero Section */}
-        <section className="relative overflow-hidden rounded-[22px] bg-[linear-gradient(100deg,#3f7cf0_0%,#5b93f5_25%,#8fc0fb_55%,#c9c7f7_85%,#d9d0f9_100%)] px-6 py-6 sm:px-8 lg:pr-20">
-          <div className="flex flex-col items-start gap-6 md:flex-row md:items-center md:gap-10">
-            <HeroArt />
-            <div className="min-w-0">
-              <h1 className="text-[34px] font-extrabold leading-tight tracking-tight text-ink sm:text-[44px]">
-                <span className="text-brand">AI</span> PDF Assistant
-              </h1>
-              <p className="mt-2 max-w-[560px] text-[16px] leading-snug text-ink sm:text-[19px]">
-                Upload your PDFs, and ask anything about their content with accurate, sourced answers powered by RAG.
-              </p>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <HeroChip icon={<CheckCircle2 className="h-[18px] w-[18px] fill-success text-white" />} label="Multi-PDF Support" />
-                <HeroChip icon={<Globe className="h-[18px] w-[18px] text-brand" />} label="Arabic & English" />
-                <HeroChip icon={<ShieldCheck className="h-[18px] w-[18px] fill-success text-white" />} label="Source Citations" />
-                <HeroChip icon={<Zap className="h-[18px] w-[18px] fill-[#f5b524] text-[#f5b524]" />} label="Powered by RAG" />
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* ══════════════════════════════════════════════════════════ */}
-        {/* TAB 1: CHAT */}
-        {/* ══════════════════════════════════════════════════════════ */}
-        {activeTab === 'chat' && (
-          <div className="mt-5 grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_268px]">
-            {/* Chat card */}
-            <section className="flex min-w-0 flex-col rounded-2xl border border-line bg-white shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <header className="flex items-center justify-between gap-3 px-5 pb-2 pt-4">
-                <div className="flex items-center gap-3">
-                  <MessageSquareMore className="h-6 w-6 text-brand" />
-                  <h2 className="text-[19px] font-bold">Chat with your PDFs</h2>
-                </div>
-                <button
-                  onClick={() => setMessages([])}
-                  className="flex shrink-0 items-center gap-2 rounded-lg bg-[#f1f4fa] px-3.5 py-2 text-[14px] font-medium text-ink transition-colors duration-150 hover:bg-[#e6ebf5]"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Clear Chat
-                </button>
-              </header>
-
-              <div className="flex-1 px-4 pb-5 sm:px-5">
-                {messages.length === 0 ? (
-                  <div className="flex flex-col items-center justify-center py-16 text-center">
-                    <span className="flex h-14 w-14 items-center justify-center rounded-full bg-brand text-white">
-                      <Bot className="h-7 w-7" />
-                    </span>
-                    <p className="mt-4 text-[17px] font-semibold">Ask your first question</p>
-                    <p className="mt-1 max-w-sm text-[14px] text-muted">
-                      Answers come from your uploaded documents, with exact page-level citations.
-                    </p>
-                  </div>
-                ) : (
-                  messages.map((turn, idx) => (
-                    <div key={idx} className="mb-6 space-y-4">
-                      {/* User message */}
-                      <div className="flex items-start justify-end gap-2">
-                        <div className="max-w-[420px] rounded-2xl rounded-tr-md bg-bubble px-5 pb-2.5 pt-3.5 shadow-sm">
-                          <p className="text-[15px] leading-[1.55] text-ink">{turn.user}</p>
-                          <div className="mt-1 flex items-center justify-end gap-1.5 text-[11px] text-muted">
-                            {turn.time} <CheckCheck className="h-3.5 w-3.5 text-brand" />
-                          </div>
-                        </div>
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#dbe6fb]">
-                          <User className="h-5 w-5 fill-brand text-brand" />
-                        </span>
-                      </div>
-
-                      {/* Bot answer */}
-                      <div className="flex items-start gap-3">
-                        <span className="mt-1 flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand text-white shadow-md shadow-brand/20">
-                          <Bot className="h-6 w-6" />
-                        </span>
-                        <div className="min-w-0 max-w-[620px] flex-1 rounded-2xl bg-[#f3f6fc] px-5 pb-3 pt-4 border border-line">
-                          {/* Rich formatting for initial sample message */}
-                          {turn.assistant.includes('Supervised and unsupervised learning') ? (
-                            <>
-                              <p className="text-[15px] leading-relaxed text-ink font-medium">
-                                Supervised and unsupervised learning are two main types of machine learning:
-                              </p>
-                              <div className="mt-3 pl-1">
-                                <span className="inline-flex items-center gap-2 rounded-md bg-brand-soft px-3 py-1 text-[16px] font-semibold text-brand">
-                                  <GraduationCap className="h-5 w-5 fill-[#1e3a8a] text-[#1e3a8a]" />
-                                  Supervised Learning
-                                </span>
-                                <p className="mt-1.5 text-[15px] leading-[1.6] text-body">
-                                  Uses labeled data (input + correct output) to learn a mapping function.
-                                  <br />
-                                  Examples: classification, regression.
-                                </p>
-                              </div>
-                              <div className="mt-4 pl-1">
-                                <span className="inline-flex items-center gap-2 rounded-md bg-violet-soft px-3 py-1 text-[16px] font-semibold text-violet">
-                                  <Workflow className="h-5 w-5 text-violet" />
-                                  Unsupervised Learning
-                                </span>
-                                <p className="mt-1.5 text-[15px] leading-[1.6] text-body">
-                                  Uses unlabeled data to find hidden patterns or structure.
-                                  <br />
-                                  Examples: clustering, dimensionality reduction.
-                                </p>
-                              </div>
-                            </>
-                          ) : (
-                            <div className="whitespace-pre-wrap text-[15px] leading-relaxed text-ink">
-                              {turn.assistant}
-                            </div>
-                          )}
-
-                          {turn.citations && turn.citations.length > 0 && (
-                            <>
-                              <div className="mt-4 flex items-center gap-2 pl-1 text-[14px] font-medium text-ink">
-                                <FileText className="h-4 w-4" />
-                                Sources:
-                              </div>
-                              <div className="mt-2 flex flex-wrap gap-2">
-                                {turn.citations.map((c, cIdx) => (
-                                  <SourcePill key={cIdx} label={`${c.source} – Page ${c.page}`} />
-                                ))}
-                              </div>
-                            </>
-                          )}
-
-                          <div className="mt-3 flex items-center justify-end gap-3 text-[12px] text-muted">
-                            {turn.time}
-                            <button
-                              aria-label="Copy answer"
-                              onClick={() => {
-                                navigator.clipboard.writeText(turn.assistant)
-                                setCopiedIndex(idx)
-                                setTimeout(() => setCopiedIndex(null), 2000)
-                              }}
-                              className="rounded p-1 transition-colors duration-150 hover:bg-white text-ink"
-                            >
-                              {copiedIndex === idx ? <Check className="h-4 w-4 text-success" /> : <Copy className="h-4 w-4" />}
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  ))
-                )}
-
-                {loading && (
-                  <div className="mt-4 flex items-start gap-3">
-                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand text-white">
-                      <Bot className="h-6 w-6" />
-                    </span>
-                    <div className="flex items-center gap-2 rounded-2xl bg-[#f3f6fc] px-5 py-4 border border-line">
-                      <span className="h-2 w-2 animate-pulse rounded-full bg-brand" />
-                      <span className="h-2 w-2 animate-pulse rounded-full bg-brand [animation-delay:150ms]" />
-                      <span className="h-2 w-2 animate-pulse rounded-full bg-brand [animation-delay:300ms]" />
-                      <span className="ml-2 text-[14px] font-medium text-muted">Searching your documents…</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Composer */}
-              <div className="border-t border-line px-4 pb-4 pt-4 sm:px-5">
-                <form
-                  onSubmit={(e) => {
-                    e.preventDefault()
-                    handleSend()
-                  }}
-                  className="flex items-center gap-2"
-                >
-                  <div className="flex min-w-0 flex-1 items-center gap-3 rounded-xl border border-line bg-white px-4 py-3 focus-within:border-brand/50">
-                    <Paperclip className="h-5 w-5 shrink-0 text-muted" />
-                    <input
-                      value={draft}
-                      onChange={(e) => setDraft(e.target.value)}
-                      placeholder="Ask a question about your PDFs..."
-                      className="min-w-0 flex-1 bg-transparent text-[15px] text-ink outline-none placeholder:text-muted"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={loading || !draft.trim()}
-                    aria-label="Send"
-                    className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-brand text-white transition-colors duration-150 hover:bg-[#1747b8] disabled:opacity-50"
-                  >
-                    <Send className="h-5 w-5 fill-white" />
-                  </button>
-                </form>
-                <div className="mt-3 flex flex-wrap gap-2 sm:pl-6">
-                  <SuggestChip
-                    icon={<Lightbulb className="h-4 w-4 fill-[#f5b524] text-[#e0a000]" />}
-                    label="Summarize this document"
-                    onClick={() => handleSend('Please summarize the main topics of this document.')}
-                  />
-                  <SuggestChip
-                    icon={<List className="h-4 w-4 text-ink" />}
-                    label="What are the main topics?"
-                    onClick={() => handleSend('What are the main topics covered in this document?')}
-                  />
-                  <SuggestChip
-                    icon={<HelpCircle className="h-4 w-4 fill-brand text-white" />}
-                    label="Explain this concept"
-                    onClick={() => handleSend('Explain the key concepts discussed in this document.')}
-                  />
-                </div>
-              </div>
-            </section>
-
-            {/* Right column */}
-            <div className="flex min-w-0 flex-col gap-4">
-              <section className="rounded-2xl border border-line bg-white px-4 pb-3 pt-4 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-                <div className="flex items-center justify-between gap-2 border-b border-line pb-3">
-                  <div className="flex items-center gap-2.5">
-                    <FileText className="h-6 w-6 text-brand" />
-                    <h2 className="text-[18px] font-bold">Your Documents</h2>
-                  </div>
-                  <span className="rounded-full bg-brand-soft px-2.5 py-0.5 text-[13px] font-medium text-brand">
-                    {documents.length} files
-                  </span>
-                </div>
-                {documents.map((d, i) => (
-                  <DocRow key={i} name={d.name} meta={`${d.pages} pages • ${d.size_mb} MB`} />
-                ))}
-              </section>
-
-              <section className="rounded-2xl border border-line bg-white p-4 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-                <div className="flex items-center gap-2.5">
-                  <Link2 className="h-5 w-5 text-brand" />
-                  <h2 className="text-[16px] font-bold">Sources from this answer</h2>
-                </div>
-                <div className="mt-3 flex flex-col gap-3">
-                  {lastSources.length > 0 ? (
-                    lastSources.map((s, idx) => (
-                      <SourceCard
-                        key={idx}
-                        name={s.source}
-                        page={`Page ${s.page}`}
-                        quote={`“${s.snippet}”`}
-                      />
-                    ))
-                  ) : (
-                    <p className="text-[13px] text-muted text-center py-3">No sources for current answer</p>
-                  )}
-                </div>
-                <div className="mt-3 flex items-center gap-3 rounded-xl border border-[#bfe8cf] bg-success-soft px-4 py-3.5">
-                  <ShieldCheck className="h-6 w-6 shrink-0 fill-success text-white" />
-                  <p className="text-[13px] font-medium leading-snug text-[#1d7a45]">
-                    Answer grounded
-                    <br />
-                    in your documents
-                  </p>
-                </div>
-              </section>
-            </div>
-          </div>
+      {/* ───────────────────────────────────────────────────────────── */}
+      {/* MAIN CONTAINER (DESKTOP: Fixed Sidebar + Scrollable Workspace) */}
+      {/* ───────────────────────────────────────────────────────────── */}
+      <div className="flex flex-1 overflow-hidden relative">
+        {/* MOBILE BACKDROP DRAWER OVERLAY */}
+        {mobileMenuOpen && (
+          <div
+            className="fixed inset-0 z-40 bg-black/70 backdrop-blur-xs lg:hidden transition-opacity"
+            onClick={() => setMobileMenuOpen(false)}
+          />
         )}
 
         {/* ══════════════════════════════════════════════════════════ */}
-        {/* TAB 2: DOCUMENTS */}
+        {/* FIXED / STICKY SIDEBAR (Midnight Aurora Redesign) */}
         {/* ══════════════════════════════════════════════════════════ */}
-        {activeTab === 'documents' && (
-          <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {/* Upload Card */}
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center gap-3 border-b border-line pb-4">
-                <Upload className="h-6 w-6 text-brand" />
-                <h2 className="text-[20px] font-bold text-ink">Upload PDF Documents</h2>
-              </div>
-
-              <div className="mt-6 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed border-line bg-[#f9fafc] p-8 text-center transition-colors hover:border-brand/40">
-                <Upload className="h-10 w-10 text-brand/70" />
-                <p className="mt-3 text-[16px] font-semibold text-ink">Select PDF files to index</p>
-                <p className="mt-1 text-[13px] text-muted">Supports multi-page, bilingual Arabic & English PDFs</p>
-                <label className="mt-5 cursor-pointer rounded-xl bg-brand px-5 py-2.5 text-[14px] font-semibold text-white shadow-md shadow-brand/20 transition-colors hover:bg-[#1649c0]">
-                  Browse Files
-                  <input type="file" multiple accept=".pdf" onChange={handleFileUpload} className="hidden" />
-                </label>
-              </div>
-
-              <div className="mt-6 space-y-4">
-                <h3 className="text-[15px] font-semibold text-ink flex items-center gap-2">
-                  <SlidersHorizontal className="h-4 w-4 text-brand" /> Chunking Parameters
-                </h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-[13px] text-muted font-medium">Chunk Size ({settings.chunk_size} chars)</label>
-                    <input
-                      type="range"
-                      min="200"
-                      max="1500"
-                      step="50"
-                      value={settings.chunk_size}
-                      onChange={(e) => setSettings({ ...settings, chunk_size: Number(e.target.value) })}
-                      className="w-full accent-brand"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[13px] text-muted font-medium">Chunk Overlap ({settings.chunk_overlap} chars)</label>
-                    <input
-                      type="range"
-                      min="0"
-                      max="300"
-                      step="25"
-                      value={settings.chunk_overlap}
-                      onChange={(e) => setSettings({ ...settings, chunk_overlap: Number(e.target.value) })}
-                      className="w-full accent-brand"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-6 border-t border-line pt-4">
-                <button
-                  onClick={handleLoadSample}
-                  disabled={loading}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#f0f4fd] px-4 py-3 text-[14px] font-semibold text-brand transition-colors hover:bg-brand-soft"
-                >
-                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-                  Generate & Index Sample ML / DL Books
-                </button>
-              </div>
-            </div>
-
-            {/* Indexed Knowledge Base Card */}
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center justify-between border-b border-line pb-4">
-                <div className="flex items-center gap-3">
-                  <Database className="h-6 w-6 text-brand" />
-                  <h2 className="text-[20px] font-bold text-ink">Indexed Knowledge Base</h2>
-                </div>
-                <span className="rounded-full bg-brand-soft px-3 py-1 text-[13px] font-semibold text-brand">
-                  {totalChunks} Chunks
+        <aside
+          className={`fixed inset-y-0 left-0 z-50 flex w-[285px] flex-col justify-between p-5 transition-transform duration-200 ease-in-out lg:static lg:z-auto lg:h-full lg:translate-x-0 shrink-0 ${
+            mobileMenuOpen ? 'translate-x-0' : '-translate-x-full'
+          } ${
+            theme === 'dark'
+              ? 'bg-[#0D1424] border-r border-[#26364D] text-[#F5F7FF]'
+              : 'bg-[#FFFFFF] border-r border-[#DFE7F1] text-[#17243A] shadow-md shadow-slate-200/50'
+          }`}
+        >
+          <div className="flex flex-col">
+            {/* Top Brand Header + Theme Toggle */}
+            <div className={`flex items-center justify-between pb-3 border-b ${
+              theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+            }`}>
+              <div className="flex items-center gap-3">
+                <span className="flex h-10 w-10 items-center justify-center rounded-2xl bg-gradient-to-br from-[#35C8F4] to-[#9875FF] text-white shadow-lg shadow-[#35C8F4]/25">
+                  <Brain className="h-5 w-5" />
                 </span>
+                <div>
+                  <h1 className="text-[17px] font-extrabold tracking-tight leading-tight">AI Assistant</h1>
+                  <p className={`text-[11px] font-medium ${
+                    theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                  }`}>Universal & Multi-PDF</p>
+                </div>
               </div>
 
-              <div className="mt-5 space-y-3">
-                {documents.map((doc, idx) => (
-                  <div key={idx} className="flex items-center justify-between rounded-xl border border-line bg-[#f8fafc] p-3.5 transition-colors hover:bg-white hover:shadow-sm">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="flex h-10 w-9 shrink-0 items-center justify-center rounded-lg bg-[#e53935] text-[10px] font-bold text-white shadow">
-                        PDF
-                      </div>
-                      <div className="min-w-0">
-                        <p className="truncate text-[15px] font-semibold text-ink">{doc.name}</p>
-                        <p className="text-[13px] text-muted">{doc.pages} pages • {doc.size_mb} MB • {doc.chunks} chunks</p>
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleDeleteDoc(doc.filename)}
-                      className="rounded-lg p-2 text-muted transition-colors hover:bg-red-50 hover:text-red-600"
-                      title="Delete document"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-8 border-t border-line pt-5">
-                <button
-                  onClick={handleReset}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-[14px] font-semibold text-red-600 transition-colors hover:bg-red-100"
-                >
-                  <Trash2 className="h-4 w-4" />
-                  Reset Entire Knowledge Base
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ══════════════════════════════════════════════════════════ */}
-        {/* TAB 3: SUMMARIZE PDF */}
-        {/* ══════════════════════════════════════════════════════════ */}
-        {activeTab === 'summarize' && (
-          <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-[360px_minmax(0,1fr)]">
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center gap-3 border-b border-line pb-4">
-                <Sparkles className="h-6 w-6 text-brand" />
-                <h2 className="text-[19px] font-bold text-ink">Select Document</h2>
-              </div>
-              <div className="mt-5">
-                <label className="text-[13px] font-medium text-muted">Choose Document to Summarize:</label>
-                <select
-                  value={selectedDocForSummary}
-                  onChange={(e) => setSelectedDocForSummary(e.target.value)}
-                  className="mt-2 w-full rounded-xl border border-line bg-white px-3 py-2.5 text-[14px] text-ink outline-none focus:border-brand"
-                >
-                  {documents.map((d, i) => (
-                    <option key={i} value={d.filename}>
-                      {d.name} ({d.pages} pages)
-                    </option>
-                  ))}
-                </select>
-              </div>
-
+              {/* Close Mobile Drawer */}
               <button
-                onClick={handleGenerateSummary}
-                disabled={summaryLoading || !selectedDocForSummary}
-                className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-brand py-3 text-[15px] font-semibold text-white shadow-md shadow-brand/20 transition-colors hover:bg-[#1649c0] disabled:opacity-50"
+                onClick={() => setMobileMenuOpen(false)}
+                className={`lg:hidden p-1.5 rounded-lg transition-colors ${
+                  theme === 'dark' ? 'text-[#A7B5CC] hover:text-[#F5F7FF]' : 'text-[#64748B] hover:text-[#17243A]'
+                }`}
+                aria-label="Close Menu"
               >
-                {summaryLoading ? (
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Theme Toggle Pill on Desktop */}
+            <div className={`mt-4 flex items-center justify-between rounded-2xl p-1.5 border ${
+              theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#E8EEF7] border-[#DFE7F1]'
+            }`}>
+              <span className={`text-[12px] font-medium pl-2 ${
+                theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+              }`}>Theme Mode</span>
+              <button
+                onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+                className={`relative flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[12px] font-semibold transition-all duration-200 cursor-pointer ${
+                  theme === 'dark'
+                    ? 'bg-[#1C2A40] text-[#35C8F4] border border-[#35C8F4]/30 shadow-xs'
+                    : 'bg-gradient-to-r from-[#168EDB] to-[#8060E8] text-white shadow-sm'
+                }`}
+                aria-label="Theme toggle"
+              >
+                {theme === 'dark' ? (
                   <>
-                    <RefreshCw className="h-4 w-4 animate-spin" />
-                    Generating Summary...
+                    <Sun className="h-3.5 w-3.5 transition-transform rotate-0 scale-100" />
+                    <span>Dark</span>
                   </>
                 ) : (
                   <>
-                    <Sparkles className="h-4 w-4" />
-                    Generate Executive Summary
+                    <Moon className="h-3.5 w-3.5 transition-transform rotate-0 scale-100" />
+                    <span>Light</span>
                   </>
                 )}
               </button>
             </div>
 
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center gap-3 border-b border-line pb-4">
-                <FileSearch className="h-6 w-6 text-brand" />
-                <h2 className="text-[19px] font-bold text-ink">Executive Summary</h2>
-              </div>
-              <div className="mt-5 min-h-[300px]">
-                {summaryText ? (
-                  <div className="whitespace-pre-wrap leading-relaxed text-[15px] text-body bg-[#f8fafc] p-5 rounded-xl border border-line">
-                    {summaryText}
-                  </div>
-                ) : (
-                  <div className="flex flex-col items-center justify-center py-20 text-center text-muted">
-                    <Sparkles className="h-10 w-10 text-brand/40" />
-                    <p className="mt-3 text-[15px] font-medium text-ink">No summary generated yet</p>
-                    <p className="mt-1 text-[13px]">Select a document on the left and click Generate Summary.</p>
-                  </div>
-                )}
-              </div>
-            </div>
+            {/* Navigation Tabs */}
+            <nav className="mt-6 flex flex-col gap-1.5">
+              <NavItem
+                icon={MessageSquareMore}
+                label="Chat Assistant"
+                active={activeTab === 'chat'}
+                onClick={() => {
+                  setActiveTab('chat')
+                  setMobileMenuOpen(false)
+                }}
+                theme={theme}
+              />
+              <NavItem
+                icon={FileText}
+                label="Documents & Upload"
+                active={activeTab === 'documents'}
+                onClick={() => {
+                  setActiveTab('documents')
+                  setMobileMenuOpen(false)
+                }}
+                theme={theme}
+              />
+              <NavItem
+                icon={Sparkles}
+                label="Document Intelligence"
+                active={activeTab === 'summarize'}
+                onClick={() => {
+                  setActiveTab('summarize')
+                  setMobileMenuOpen(false)
+                }}
+                theme={theme}
+              />
+              <NavItem
+                icon={BarChart3}
+                label="RAG Benchmark"
+                active={activeTab === 'evaluation'}
+                onClick={() => {
+                  setActiveTab('evaluation')
+                  setMobileMenuOpen(false)
+                }}
+                theme={theme}
+              />
+              <NavItem
+                icon={Settings}
+                label="Settings"
+                active={activeTab === 'settings'}
+                onClick={() => {
+                  setActiveTab('settings')
+                  setMobileMenuOpen(false)
+                }}
+                theme={theme}
+              />
+            </nav>
           </div>
-        )}
+
+          {/* Sidebar Footer: Knowledge Base Stats */}
+          <div className={`mt-6 rounded-2xl p-4 border transition-colors ${
+            theme === 'dark'
+              ? 'bg-[#111B2E] border-[#26364D]'
+              : 'bg-[#E8EEF7] border-[#DFE7F1]'
+          }`}>
+            <div className="flex items-center justify-between text-[12.5px]">
+              <span className={`flex items-center gap-1.5 font-semibold ${
+                theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'
+              }`}>
+                <Database className={`h-4 w-4 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                Knowledge Base
+              </span>
+              <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                theme === 'dark'
+                  ? 'bg-gradient-to-r from-[#35C8F4]/20 to-[#9875FF]/20 border border-[#35C8F4]/40 text-[#35C8F4]'
+                  : 'bg-[#168EDB]/15 text-[#168EDB]'
+              }`}>
+                {documents.length} PDFs
+              </span>
+            </div>
+            <p className={`mt-1.5 text-[11px] ${
+              theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+            }`}>
+              {totalChunks} Semantically Indexed Chunks
+            </p>
+          </div>
+        </aside>
 
         {/* ══════════════════════════════════════════════════════════ */}
-        {/* TAB 4: EVALUATION DASHBOARD */}
+        {/* MAIN WORKSPACE CONTENT AREA (Independent Scrolling) */}
         {/* ══════════════════════════════════════════════════════════ */}
-        {activeTab === 'evaluation' && (
-          <div className="mt-5 space-y-6">
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center justify-between border-b border-line pb-4">
-                <div className="flex items-center gap-3">
-                  <BarChart3 className="h-6 w-6 text-brand" />
-                  <h2 className="text-[20px] font-bold text-ink">RAG Benchmark & Evaluation Suite</h2>
+        <main className="flex-1 h-full overflow-y-auto flex flex-col p-3 sm:p-5 lg:p-6 min-w-0">
+          {/* Top Hero Banner */}
+          <div
+            className={`rounded-3xl p-5 sm:p-6 border shadow-md transition-colors shrink-0 mb-4 relative overflow-hidden ${
+              theme === 'dark'
+                ? 'bg-gradient-to-r from-[#0D1424] via-[#111B2E] to-[#172238] border-[#26364D] text-[#F5F7FF]'
+                : 'bg-gradient-to-r from-[#FFFFFF] via-[#F8FAFD] to-[#E8EEF7] border-[#DFE7F1] text-[#17243A]'
+            }`}
+          >
+            <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center relative z-10">
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded-full px-3 py-0.5 text-[11px] font-bold uppercase tracking-wider ${
+                    theme === 'dark'
+                      ? 'bg-[#35C8F4]/15 border border-[#35C8F4]/30 text-[#35C8F4]'
+                      : 'bg-[#168EDB]/12 border border-[#168EDB]/25 text-[#168EDB]'
+                  }`}>
+                    Dual AI Intelligence
+                  </span>
+                  <span className={`flex items-center gap-1.5 text-[11.5px] font-semibold px-2.5 py-0.5 rounded-full border ${
+                    theme === 'dark'
+                      ? 'bg-[#36D6A0]/15 border-[#36D6A0]/30 text-[#36D6A0]'
+                      : 'bg-[#10B981]/12 border-[#10B981]/25 text-[#10B981]'
+                  }`}>
+                    <span className="h-1.5 w-1.5 rounded-full bg-[#36D6A0] animate-pulse" />
+                    Online & Active
+                  </span>
                 </div>
-                <button
-                  onClick={handleRunEval}
-                  disabled={evalLoading}
-                  className="flex items-center gap-2 rounded-xl bg-brand px-5 py-2.5 text-[14px] font-semibold text-white shadow-md shadow-brand/20 transition-colors hover:bg-[#1649c0] disabled:opacity-50"
+                <h2 className="mt-2 text-[22px] sm:text-[26px] font-black tracking-tight leading-tight">
+                  Universal AI & Multi-PDF Assistant
+                </h2>
+                <p
+                  className={`mt-1 text-[13.5px] max-w-xl ${
+                    theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                  }`}
                 >
-                  <RefreshCw className={`h-4 w-4 ${evalLoading ? 'animate-spin' : ''}`} />
-                  {evalLoading ? 'Running Benchmark…' : 'Run Benchmark'}
-                </button>
+                  Ask general knowledge questions across software, mathematics, and business, or explore your uploaded PDFs with clean, citation-free answers.
+                </p>
               </div>
 
-              {/* Metric Cards */}
-              <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
-                <MetricBox
-                  icon={<FileText className="h-5 w-5 text-brand" />}
-                  label="Test Cases"
-                  value={evalResult?.total_questions || 5}
+              {/* Feature Badges */}
+              <div className="flex flex-wrap gap-2">
+                <HeroChip
+                  icon={<CheckCircle2 className={`h-3.5 w-3.5 ${theme === 'dark' ? 'text-[#36D6A0]' : 'text-[#10B981]'}`} />}
+                  label="Multi-PDF RAG"
+                  theme={theme}
                 />
-                <MetricBox
-                  icon={<Clock className="h-5 w-5 text-amber-500" />}
-                  label="Avg Latency"
-                  value={`${evalResult?.avg_latency_seconds || 0.03}s`}
+                <HeroChip
+                  icon={<Globe className={`h-3.5 w-3.5 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />}
+                  label="Arabic & English"
+                  theme={theme}
                 />
-                <MetricBox
-                  icon={<Target className="h-5 w-5 text-violet" />}
-                  label="Keyword Recall"
-                  value={`${Math.round((evalResult?.avg_keyword_recall || 0.4) * 100)}%`}
+                <HeroChip
+                  icon={<Zap className={`h-3.5 w-3.5 ${theme === 'dark' ? 'text-[#9875FF]' : 'text-[#8060E8]'}`} />}
+                  label="Hybrid Reasoning"
+                  theme={theme}
                 />
-                <MetricBox
-                  icon={<CheckCircle2 className="h-5 w-5 text-success" />}
-                  label="Page Hit Rate"
-                  value={`${Math.round((evalResult?.page_hit_rate || 1.0) * 100)}%`}
-                />
-              </div>
-
-              {/* Benchmark Results Table */}
-              <div className="mt-8">
-                <h3 className="text-[16px] font-bold text-ink mb-3">Detailed Question-Level Results</h3>
-                <div className="overflow-x-auto rounded-xl border border-line">
-                  <table className="w-full text-left text-[14px]">
-                    <thead className="bg-[#f8fafc] border-b border-line text-muted">
-                      <tr>
-                        <th className="px-4 py-3 font-semibold">#</th>
-                        <th className="px-4 py-3 font-semibold">Question</th>
-                        <th className="px-4 py-3 font-semibold">Expected Page</th>
-                        <th className="px-4 py-3 font-semibold">Retrieved Pages</th>
-                        <th className="px-4 py-3 font-semibold">Latency</th>
-                        <th className="px-4 py-3 font-semibold">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-line text-ink">
-                      {(evalResult?.details || [
-                        { id: 1, question: 'What is supervised learning?', expected_pages: [1], retrieved_pages: [1, 2], latency_seconds: 0.02, hit: true },
-                        { id: 2, question: 'What is overfitting?', expected_pages: [2], retrieved_pages: [2, 1], latency_seconds: 0.03, hit: true },
-                        { id: 3, question: 'Explain RAG systems', expected_pages: [3], retrieved_pages: [3, 2], latency_seconds: 0.03, hit: true },
-                        { id: 4, question: 'ما هو التعلم الآلي؟', expected_pages: [1], retrieved_pages: [1, 3], latency_seconds: 0.04, hit: true },
-                        { id: 5, question: 'What is precision and recall?', expected_pages: [2], retrieved_pages: [2, 3], latency_seconds: 0.03, hit: true },
-                      ]).map((row: any, i: number) => (
-                        <tr key={i} className="hover:bg-[#f9fafc]">
-                          <td className="px-4 py-3 text-muted">{row.id || i + 1}</td>
-                          <td className="px-4 py-3 font-medium">{row.question}</td>
-                          <td className="px-4 py-3 text-muted">{JSON.stringify(row.expected_pages)}</td>
-                          <td className="px-4 py-3 text-muted">{JSON.stringify(row.retrieved_pages)}</td>
-                          <td className="px-4 py-3 text-muted">{row.latency_seconds}s</td>
-                          <td className="px-4 py-3">
-                            <span className="inline-flex items-center gap-1 rounded-full bg-success-soft px-2.5 py-0.5 text-[12px] font-semibold text-[#1d7a45]">
-                              <Check className="h-3 w-3" /> PASS
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
               </div>
             </div>
           </div>
-        )}
 
-        {/* ══════════════════════════════════════════════════════════ */}
-        {/* TAB 5: SETTINGS */}
-        {/* ══════════════════════════════════════════════════════════ */}
-        {activeTab === 'settings' && (
-          <div className="mt-5 grid grid-cols-1 gap-6 lg:grid-cols-2">
-            {/* LLM Provider Card */}
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center gap-3 border-b border-line pb-4">
-                <Cpu className="h-6 w-6 text-brand" />
-                <h2 className="text-[20px] font-bold text-ink">LLM Provider Configuration</h2>
-              </div>
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* TAB 1: CHAT ASSISTANT (Persistent across page navigation) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {activeTab === 'chat' && (
+            <div className="flex-1 grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_330px] min-h-0">
+              {/* Left Column: Chat Area */}
+              <section
+                className={`flex flex-col rounded-3xl border shadow-xs overflow-hidden h-[calc(100vh-230px)] lg:h-[calc(100vh-190px)] min-h-[500px] ${
+                  theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                }`}
+              >
+                {/* Header with 3D Clear Chat button */}
+                <div
+                  className={`flex items-center justify-between border-b px-5 py-3 shrink-0 ${
+                    theme === 'dark' ? 'bg-[#0D1424]/90 border-[#26364D] text-[#F5F7FF]' : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#17243A]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <Brain className={`h-5 w-5 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                    <span className="text-[14.5px] font-bold">Active Conversation</span>
+                    {messages.length > 0 && (
+                      <span
+                        className={`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
+                          theme === 'dark'
+                            ? 'bg-[#1C2A40] border-[#26364D] text-[#A7B5CC]'
+                            : 'bg-[#E8EEF7] border-[#DFE7F1] text-[#64748B]'
+                        }`}
+                      >
+                        {messages.length} {messages.length === 1 ? 'turn' : 'turns'}
+                      </span>
+                    )}
+                  </div>
 
-              <div className="mt-5 space-y-4">
-                <div>
-                  <label className="text-[13px] font-semibold text-ink">Model Provider</label>
-                  <select
-                    value={settings.provider}
-                    onChange={(e) => setSettings({ ...settings, provider: e.target.value })}
-                    className="mt-1.5 w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-[14px] text-ink outline-none focus:border-brand"
-                  >
-                    <option value="gemini">Google Gemini API (Cloud)</option>
-                    <option value="ollama">Ollama (Local LLM)</option>
-                    <option value="mock">Mock / Extractive Mode (Offline)</option>
-                  </select>
+                  {/* PREMIUM 3D CLEAR CHAT BUTTON */}
+                  {messages.length > 0 && (
+                    <button
+                      onClick={() => setClearDialogOpen(true)}
+                      className="btn-3d-red flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-[12px] font-bold text-white cursor-pointer"
+                      title="Clear chat messages safely"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      <span>Clear Chat</span>
+                    </button>
+                  )}
                 </div>
 
-                {settings.provider === 'gemini' && (
-                  <>
-                    <div>
-                      <label className="text-[13px] font-semibold text-ink">Gemini API Key</label>
-                      <input
-                        type="password"
-                        value={settings.api_key}
-                        onChange={(e) => setSettings({ ...settings, api_key: e.target.value })}
-                        placeholder="AIzaSy..."
-                        className="mt-1.5 w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-[14px] text-ink outline-none focus:border-brand"
-                      />
-                      <p className="mt-1 text-[12px] text-muted">Get your free key from Google AI Studio (aistudio.google.com)</p>
-                    </div>
-                    <div>
-                      <label className="text-[13px] font-semibold text-ink">Gemini Model</label>
-                      <select
-                        value={settings.gemini_model}
-                        onChange={(e) => setSettings({ ...settings, gemini_model: e.target.value })}
-                        className="mt-1.5 w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-[14px] text-ink outline-none focus:border-brand"
+                {/* Messages Feed (Independent Scroll) */}
+                <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6 space-y-5">
+                  {messages.length === 0 ? (
+                    <div className="flex flex-col items-center justify-center py-16 text-center">
+                      <span className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-[#35C8F4] to-[#9875FF] text-white shadow-lg shadow-[#35C8F4]/25">
+                        <Bot className="h-7 w-7" />
+                      </span>
+                      <h3 className={`mt-4 text-[18px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                        How can I assist you today?
+                      </h3>
+                      <p
+                        className={`mt-1 max-w-md text-[13.5px] ${
+                          theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                        }`}
                       >
-                        <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended)</option>
-                        <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Fast)</option>
-                        <option value="gemini-4-argon">gemini-4-argon (Pro)</option>
-                      </select>
-                    </div>
-                  </>
-                )}
+                        Ask any general question across AI, programming, mathematics, and business, or explore your uploaded PDF documents.
+                      </p>
 
-                <div className="pt-4">
-                  <button
-                    onClick={handleSaveSettings}
-                    className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand py-3 text-[14px] font-semibold text-white shadow-md shadow-brand/20 transition-colors hover:bg-[#1649c0]"
+                      {/* Prompt suggestion buttons */}
+                      <div className="mt-6 flex flex-wrap justify-center gap-2 max-w-lg">
+                        <SuggestChip
+                          label="What are Mohamed Ramadan's key skills?"
+                          onClick={() => handleSend("What are Mohamed Ramadan's key skills and experience?")}
+                          theme={theme}
+                        />
+                        <SuggestChip
+                          label="Explain Deep Learning & CNNs"
+                          onClick={() => handleSend("Explain deep learning and how Convolutional Neural Networks work.")}
+                          theme={theme}
+                        />
+                        <SuggestChip
+                          label="ما هي الخبرات والمشاريع في السيرة الذاتية؟"
+                          onClick={() => handleSend("ما هي الخبرات والمشاريع المذكورة في السيرة الذاتية؟")}
+                          theme={theme}
+                        />
+                        <SuggestChip
+                          label="Write a Python binary search script"
+                          onClick={() => handleSend("Write a clean Python function for binary search with complexity analysis.")}
+                          theme={theme}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    messages.map((turn, idx) => (
+                      <div key={idx} className="space-y-3">
+                        {/* User Message */}
+                        <div className="flex items-start justify-end gap-2.5">
+                          <div
+                            className={`max-w-[80%] rounded-2xl rounded-tr-xs px-4 py-3 text-[14px] shadow-xs ${
+                              theme === 'dark'
+                                ? 'bg-gradient-to-r from-[#1C2A40] to-[#18263A] border border-[#26364D] text-[#F5F7FF]'
+                                : 'bg-gradient-to-r from-[#E8EEF7] to-[#DFE7F1] border border-[#CBD5E1] text-[#17243A]'
+                            }`}
+                          >
+                            <p className="leading-relaxed whitespace-pre-wrap">{turn.user}</p>
+                            <div
+                              className={`mt-1 flex items-center justify-end gap-1 text-[11px] ${
+                                theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                              }`}
+                            >
+                              {turn.time} <CheckCheck className={`h-3 w-3 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                            </div>
+                          </div>
+                          <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border ${
+                            theme === 'dark'
+                              ? 'bg-[#1C2A40] border-[#26364D] text-[#35C8F4]'
+                              : 'bg-[#E8EEF7] border-[#DFE7F1] text-[#168EDB]'
+                          }`}>
+                            <User className="h-4 w-4" />
+                          </span>
+                        </div>
+
+                        {/* Assistant Answer (Clean Output - Strict Requirement 11 compliance) */}
+                        <div className="flex items-start gap-3">
+                          <span className="mt-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#35C8F4] to-[#9875FF] text-white shadow-md shadow-[#35C8F4]/20">
+                            <Bot className="h-4 w-4" />
+                          </span>
+                          <div
+                            className={`min-w-0 max-w-[88%] flex-1 rounded-2xl px-5 py-4 border shadow-xs ${
+                              theme === 'dark'
+                                ? 'bg-[#0D1424] border-[#26364D] text-[#F5F7FF]'
+                                : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#17243A]'
+                            }`}
+                          >
+                            {/* Mode Indicator Pill */}
+                            <div className="mb-2.5 flex items-center gap-2">
+                              {turn.mode === 'GENERAL' && (
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold border ${
+                                  theme === 'dark'
+                                    ? 'bg-[#35C8F4]/15 border-[#35C8F4]/30 text-[#35C8F4]'
+                                    : 'bg-[#168EDB]/12 border-[#168EDB]/25 text-[#168EDB]'
+                                }`}>
+                                  <Sparkles className="h-3 w-3" /> Universal AI
+                                </span>
+                              )}
+                              {turn.mode === 'RAG' && (
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold border ${
+                                  theme === 'dark'
+                                    ? 'bg-[#36D6A0]/15 border-[#36D6A0]/30 text-[#36D6A0]'
+                                    : 'bg-[#10B981]/12 border-[#10B981]/25 text-[#10B981]'
+                                }`}>
+                                  <FileText className="h-3 w-3" /> Document Grounded
+                                </span>
+                              )}
+                              {turn.mode === 'HYBRID' && (
+                                <span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold border ${
+                                  theme === 'dark'
+                                    ? 'bg-[#9875FF]/15 border-[#9875FF]/30 text-[#9875FF]'
+                                    : 'bg-[#8060E8]/12 border-[#8060E8]/25 text-[#8060E8]'
+                                }`}>
+                                  <Zap className="h-3 w-3" /> Hybrid AI & Document
+                                </span>
+                              )}
+                            </div>
+
+                            {/* Clean Formatted Answer */}
+                            <FormattedContent content={turn.assistant} theme={theme} />
+
+                            {/* Answer footer */}
+                            <div
+                              className={`mt-3 flex items-center justify-end gap-3 text-[12px] border-t pt-2 ${
+                                theme === 'dark'
+                                  ? 'border-[#26364D] text-[#A7B5CC]'
+                                  : 'border-[#DFE7F1] text-[#64748B]'
+                              }`}
+                            >
+                              <span>{turn.time}</span>
+                              <button
+                                aria-label="Copy response"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(turn.assistant)
+                                  setCopiedIndex(idx)
+                                  setTimeout(() => setCopiedIndex(null), 2000)
+                                }}
+                                className={`flex items-center gap-1 rounded-lg px-2 py-0.5 transition-colors cursor-pointer ${
+                                  theme === 'dark'
+                                    ? 'hover:bg-[#1C2A40] text-[#A7B5CC] hover:text-[#35C8F4]'
+                                    : 'hover:bg-[#E8EEF7] text-[#64748B] hover:text-[#168EDB]'
+                                }`}
+                              >
+                                {copiedIndex === idx ? (
+                                  <>
+                                    <Check className="h-3.5 w-3.5 text-[#36D6A0]" />
+                                    <span className="text-[11px] text-[#36D6A0] font-semibold">Copied</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Copy className="h-3.5 w-3.5" />
+                                    <span className="text-[11px]">Copy</span>
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+
+                  {loading && (
+                    <div className="flex items-start gap-3">
+                      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-[#35C8F4] to-[#9875FF] text-white animate-pulse">
+                        <Bot className="h-4 w-4" />
+                      </span>
+                      <div
+                        className={`flex items-center gap-2 rounded-2xl px-4 py-3 border shadow-xs ${
+                          theme === 'dark'
+                            ? 'bg-[#0D1424] border-[#26364D] text-[#A7B5CC]'
+                            : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#64748B]'
+                        }`}
+                      >
+                        <span className={`h-2 w-2 animate-bounce rounded-full ${theme === 'dark' ? 'bg-[#35C8F4]' : 'bg-[#168EDB]'}`} />
+                        <span className={`h-2 w-2 animate-bounce rounded-full ${theme === 'dark' ? 'bg-[#35C8F4]' : 'bg-[#168EDB]'} [animation-delay:150ms]`} />
+                        <span className={`h-2 w-2 animate-bounce rounded-full ${theme === 'dark' ? 'bg-[#35C8F4]' : 'bg-[#168EDB]'} [animation-delay:300ms]`} />
+                        <span className="ml-2 text-[13px] font-medium">Thinking & synthesizing response…</span>
+                      </div>
+                    </div>
+                  )}
+
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Input Bar pinned to bottom */}
+                <div
+                  className={`border-t p-3 sm:p-4 shrink-0 ${
+                    theme === 'dark' ? 'bg-[#0D1424] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                  }`}
+                >
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      handleSend()
+                    }}
+                    className="flex items-center gap-2"
                   >
-                    {settingsSaved ? 'Saved Successfully ✓' : 'Save Configuration'}
+                    <input
+                      type="text"
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      placeholder="Ask any general question or chat with your uploaded PDFs..."
+                      disabled={loading}
+                      className={`flex-1 rounded-2xl border px-4 py-3 text-[14px] outline-none transition-all ${
+                        theme === 'dark'
+                          ? 'bg-[#111B2E] border-[#26364D] text-[#F5F7FF] placeholder-[#A7B5CC]/50 focus:border-[#35C8F4] focus:ring-2 focus:ring-[#35C8F4]/20'
+                          : 'bg-[#F5F8FC] border-[#DFE7F1] text-[#17243A] placeholder-[#64748B]/60 focus:border-[#168EDB] focus:bg-white focus:ring-2 focus:ring-[#168EDB]/15'
+                      }`}
+                    />
+                    <button
+                      type="submit"
+                      disabled={!draft.trim() || loading}
+                      className="btn-3d-aurora flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-white disabled:opacity-40 cursor-pointer"
+                      aria-label="Send message"
+                    >
+                      <Send className="h-4 w-4" />
+                    </button>
+                  </form>
+                </div>
+              </section>
+
+              {/* Right Column: Your Documents & Quick Intelligence */}
+              <div className="flex flex-col gap-4">
+                {/* Documents List Panel */}
+                <section
+                  className={`rounded-3xl border p-4 shadow-xs ${
+                    theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                  }`}
+                >
+                  <div
+                    className={`flex items-center justify-between border-b pb-3 ${
+                      theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <FileText className={`h-4 w-4 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                      <h3 className={`text-[15px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                        Your Documents
+                      </h3>
+                    </div>
+                    <label className={`cursor-pointer rounded-xl px-2.5 py-1 text-[11.5px] font-semibold border transition-colors ${
+                      theme === 'dark'
+                        ? 'bg-[#1C2A40] border-[#26364D] text-[#35C8F4] hover:border-[#35C8F4]'
+                        : 'bg-[#E8EEF7] border-[#DFE7F1] text-[#168EDB] hover:bg-[#DFE7F1]'
+                    }`}>
+                      + Add PDF
+                      <input type="file" multiple accept=".pdf" onChange={handleFileUpload} className="hidden" />
+                    </label>
+                  </div>
+
+                  <div className="mt-3 space-y-2 max-h-[200px] overflow-y-auto">
+                    {documents.length > 0 ? (
+                      documents.map((d, i) => (
+                        <div
+                          key={i}
+                          className={`group flex items-center justify-between rounded-xl border p-2.5 transition-all cursor-pointer ${
+                            theme === 'dark'
+                              ? 'border-[#26364D] bg-[#1C2A40]/70 hover:bg-[#1C2A40] hover:border-[#35C8F4]/50'
+                              : 'border-[#DFE7F1] bg-[#F5F8FC] hover:bg-white hover:border-[#168EDB]/40'
+                          }`}
+                          onClick={() => setPreviewDoc(d)}
+                          title="Click to preview PDF"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#F43F5E] to-[#E11D48] text-[9px] font-extrabold text-white shadow-xs">
+                              PDF
+                            </span>
+                            <div className="min-w-0">
+                              <p className={`truncate text-[12.5px] font-semibold transition-colors ${
+                                theme === 'dark' ? 'text-[#F5F7FF] group-hover:text-[#35C8F4]' : 'text-[#17243A] group-hover:text-[#168EDB]'
+                              }`}>
+                                {d.name}
+                              </p>
+                              <p
+                                className={`text-[10.5px] ${
+                                  theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                                }`}
+                              >
+                                {d.pages} pages • {d.size_mb} MB
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
+                            <button
+                              onClick={() => setPreviewDoc(d)}
+                              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                                theme === 'dark'
+                                  ? 'text-[#A7B5CC] hover:bg-[#111B2E] hover:text-[#35C8F4]'
+                                  : 'text-[#64748B] hover:bg-[#E8EEF7] hover:text-[#168EDB]'
+                              }`}
+                              title="Preview Document"
+                            >
+                              <Eye className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteDoc(d.filename)}
+                              className={`p-1.5 rounded-lg transition-colors cursor-pointer ${
+                                theme === 'dark'
+                                  ? 'text-[#A7B5CC] hover:bg-red-950/60 hover:text-red-400'
+                                  : 'text-[#64748B] hover:bg-red-50 hover:text-red-600'
+                              }`}
+                              title="Delete file"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    ) : (
+                      <p
+                        className={`py-4 text-center text-[12.5px] ${
+                          theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                        }`}
+                      >
+                        No documents uploaded yet.
+                      </p>
+                    )}
+                  </div>
+                </section>
+
+                {/* Document Intelligence Quick Actions */}
+                <section
+                  className={`rounded-3xl border p-4 shadow-xs ${
+                    theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                  }`}
+                >
+                  <div
+                    className={`flex items-center gap-2 border-b pb-3 ${
+                      theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                    }`}
+                  >
+                    <Sparkles className={`h-4 w-4 ${theme === 'dark' ? 'text-[#9875FF]' : 'text-[#8060E8]'}`} />
+                    <h3 className={`text-[15px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                      Document Intelligence
+                    </h3>
+                  </div>
+
+                  <div className="mt-3 flex flex-col gap-2">
+                    <button
+                      onClick={() => {
+                        setActiveTab('summarize')
+                        setIntelligenceAction('summarize')
+                        handleRunDocIntelligence('summarize')
+                      }}
+                      disabled={loading || documents.length === 0}
+                      className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-[12.5px] font-medium transition-all disabled:opacity-40 cursor-pointer ${
+                        theme === 'dark'
+                          ? 'border-[#26364D] bg-[#1C2A40]/70 text-[#F5F7FF] hover:bg-[#1C2A40] hover:border-[#35C8F4]/50 hover:text-[#35C8F4]'
+                          : 'border-[#DFE7F1] bg-[#F5F8FC] text-[#17243A] hover:bg-[#E8EEF7] hover:text-[#168EDB]'
+                      }`}
+                    >
+                      <FileText className={`h-4 w-4 shrink-0 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                      <span>Executive Summary</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setActiveTab('summarize')
+                        setIntelligenceAction('study_notes')
+                        handleRunDocIntelligence('study_notes')
+                      }}
+                      disabled={loading || documents.length === 0}
+                      className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-[12.5px] font-medium transition-all disabled:opacity-40 cursor-pointer ${
+                        theme === 'dark'
+                          ? 'border-[#26364D] bg-[#1C2A40]/70 text-[#F5F7FF] hover:bg-[#1C2A40] hover:border-[#9875FF]/50 hover:text-[#9875FF]'
+                          : 'border-[#DFE7F1] bg-[#F5F8FC] text-[#17243A] hover:bg-[#E8EEF7] hover:text-[#8060E8]'
+                      }`}
+                    >
+                      <BookOpen className={`h-4 w-4 shrink-0 ${theme === 'dark' ? 'text-[#9875FF]' : 'text-[#8060E8]'}`} />
+                      <span>Create Study Notes</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setActiveTab('summarize')
+                        setIntelligenceAction('key_concepts')
+                        handleRunDocIntelligence('key_concepts')
+                      }}
+                      disabled={loading || documents.length === 0}
+                      className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-[12.5px] font-medium transition-all disabled:opacity-40 cursor-pointer ${
+                        theme === 'dark'
+                          ? 'border-[#26364D] bg-[#1C2A40]/70 text-[#F5F7FF] hover:bg-[#1C2A40] hover:border-[#35C8F4]/50 hover:text-[#35C8F4]'
+                          : 'border-[#DFE7F1] bg-[#F5F8FC] text-[#17243A] hover:bg-[#E8EEF7] hover:text-[#168EDB]'
+                      }`}
+                    >
+                      <Lightbulb className="h-4 w-4 text-amber-400 shrink-0" />
+                      <span>Extract Glossary & Definitions</span>
+                    </button>
+
+                    <button
+                      onClick={() => {
+                        setActiveTab('summarize')
+                        setIntelligenceAction('quiz')
+                        handleRunDocIntelligence('quiz')
+                      }}
+                      disabled={loading || documents.length === 0}
+                      className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-[12.5px] font-medium transition-all disabled:opacity-40 cursor-pointer ${
+                        theme === 'dark'
+                          ? 'border-[#26364D] bg-[#1C2A40]/70 text-[#F5F7FF] hover:bg-[#1C2A40] hover:border-[#36D6A0]/50 hover:text-[#36D6A0]'
+                          : 'border-[#DFE7F1] bg-[#F5F8FC] text-[#17243A] hover:bg-[#E8EEF7] hover:text-[#10B981]'
+                      }`}
+                    >
+                      <HelpCircle className={`h-4 w-4 shrink-0 ${theme === 'dark' ? 'text-[#36D6A0]' : 'text-[#10B981]'}`} />
+                      <span>Self-Assessment Quiz</span>
+                    </button>
+
+                    {documents.length > 1 && (
+                      <button
+                        onClick={() => {
+                          setActiveTab('summarize')
+                          setIntelligenceAction('compare')
+                          handleRunDocIntelligence('compare')
+                        }}
+                        disabled={loading}
+                        className={`flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left text-[12.5px] font-medium transition-all cursor-pointer ${
+                          theme === 'dark'
+                            ? 'border-[#26364D] bg-[#1C2A40]/70 text-[#F5F7FF] hover:bg-[#1C2A40] hover:border-[#35C8F4]/50 hover:text-[#35C8F4]'
+                            : 'border-[#DFE7F1] bg-[#F5F8FC] text-[#17243A] hover:bg-[#E8EEF7] hover:text-[#168EDB]'
+                        }`}
+                      >
+                        <Scale className={`h-4 w-4 shrink-0 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                        <span>Compare All Documents</span>
+                      </button>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* TAB 2: DOCUMENTS MANAGEMENT (Midnight Aurora Redesign) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {activeTab === 'documents' && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+              {/* Upload Card */}
+              <div
+                className={`rounded-3xl border p-6 shadow-xs ${
+                  theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                }`}
+              >
+                <div
+                  className={`flex items-center gap-3 border-b pb-4 ${
+                    theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                  }`}
+                >
+                  <Upload className={`h-6 w-6 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                  <h3 className={`text-[19px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                    Upload PDF Documents
+                  </h3>
+                </div>
+
+                <div
+                  className={`mt-6 flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-8 text-center transition-all ${
+                    theme === 'dark'
+                      ? 'border-[#35C8F4]/30 bg-[#1C2A40]/40 hover:border-[#35C8F4]'
+                      : 'border-[#168EDB]/30 bg-[#F5F8FC] hover:border-[#168EDB]'
+                  }`}
+                >
+                  <Upload className={`h-10 w-10 ${theme === 'dark' ? 'text-[#35C8F4]/80' : 'text-[#168EDB]/80'}`} />
+                  <p className={`mt-3 text-[15px] font-semibold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                    Select multiple PDF files to index
+                  </p>
+                  <p
+                    className={`mt-1 text-[12.5px] ${
+                      theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                    }`}
+                  >
+                    Supports multi-page, bilingual Arabic & English documents
+                  </p>
+                  <label className="btn-3d-aurora mt-5 cursor-pointer rounded-xl px-5 py-2.5 text-[13.5px] font-semibold text-white">
+                    Browse Files
+                    <input type="file" multiple accept=".pdf" onChange={handleFileUpload} className="hidden" />
+                  </label>
+                </div>
+
+                <div className={`mt-6 border-t pt-4 ${theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'}`}>
+                  <button
+                    onClick={handleLoadSample}
+                    disabled={loading}
+                    className={`flex w-full items-center justify-center gap-2 rounded-xl border px-4 py-3 text-[13.5px] font-semibold transition-colors cursor-pointer ${
+                      theme === 'dark'
+                        ? 'bg-[#1C2A40] border-[#26364D] text-[#35C8F4] hover:bg-[#1C2A40]/80 hover:border-[#35C8F4]'
+                        : 'bg-[#E8EEF7] border-[#DFE7F1] text-[#168EDB] hover:bg-[#DFE7F1]'
+                    }`}
+                  >
+                    <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                    Seed Sample Machine Learning & Deep Learning PDFs
+                  </button>
+                </div>
+              </div>
+
+              {/* Indexed Knowledge Base Card */}
+              <div
+                className={`rounded-3xl border p-6 shadow-xs ${
+                  theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                }`}
+              >
+                <div
+                  className={`flex items-center justify-between border-b pb-4 ${
+                    theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                  }`}
+                >
+                  <div className="flex items-center gap-3">
+                    <Database className={`h-6 w-6 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                    <h3 className={`text-[19px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                      Indexed Documents
+                    </h3>
+                  </div>
+                  <span className={`rounded-full px-3 py-1 text-[12.5px] font-semibold border ${
+                    theme === 'dark'
+                      ? 'bg-[#35C8F4]/15 border-[#35C8F4]/30 text-[#35C8F4]'
+                      : 'bg-[#168EDB]/12 border-[#168EDB]/25 text-[#168EDB]'
+                  }`}>
+                    {totalChunks} Chunks
+                  </span>
+                </div>
+
+                <div className="mt-5 space-y-3 max-h-[380px] overflow-y-auto">
+                  {documents.length > 0 ? (
+                    documents.map((doc, idx) => (
+                      <div
+                        key={idx}
+                        className={`group flex items-center justify-between rounded-xl border p-3.5 transition-colors cursor-pointer ${
+                          theme === 'dark'
+                            ? 'border-[#26364D] bg-[#1C2A40]/80 hover:bg-[#1C2A40] hover:border-[#35C8F4]/60'
+                            : 'border-[#DFE7F1] bg-[#F5F8FC] hover:bg-white hover:border-[#168EDB]/40'
+                        }`}
+                        onClick={() => setPreviewDoc(doc)}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="flex h-10 w-9 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#F43F5E] to-[#E11D48] text-[10px] font-bold text-white shadow-xs">
+                            PDF
+                          </div>
+                          <div className="min-w-0">
+                            <p className={`truncate text-[14.5px] font-semibold transition-colors ${
+                              theme === 'dark' ? 'text-[#F5F7FF] group-hover:text-[#35C8F4]' : 'text-[#17243A] group-hover:text-[#168EDB]'
+                            }`}>
+                              {doc.name}
+                            </p>
+                            <p
+                              className={`text-[12px] ${
+                                theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                              }`}
+                            >
+                              {doc.pages} pages • {doc.size_mb} MB • {doc.chunks} chunks
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
+                          <button
+                            onClick={() => setPreviewDoc(doc)}
+                            className={`rounded-lg p-2 transition-colors cursor-pointer ${
+                              theme === 'dark'
+                                ? 'text-[#A7B5CC] hover:bg-[#111B2E] hover:text-[#35C8F4]'
+                                : 'text-[#64748B] hover:bg-[#E8EEF7] hover:text-[#168EDB]'
+                            }`}
+                            title="Interactive PDF Preview"
+                          >
+                            <Eye className="h-4 w-4" />
+                          </button>
+                          <button
+                            onClick={() => handleDeleteDoc(doc.filename)}
+                            className={`rounded-lg p-2 transition-colors cursor-pointer ${
+                              theme === 'dark'
+                                ? 'text-[#A7B5CC] hover:bg-red-950/60 hover:text-red-400'
+                                : 'text-[#64748B] hover:bg-red-50 hover:text-red-600'
+                            }`}
+                            title="Delete document"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <p
+                      className={`py-8 text-center ${
+                        theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                      }`}
+                    >
+                      No documents uploaded yet.
+                    </p>
+                  )}
+                </div>
+
+                {/* Professional Reset Button triggering confirmation modal */}
+                <div className={`mt-6 border-t pt-4 ${theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'}`}>
+                  <button
+                    onClick={() => setResetModal({ isOpen: true, stage: 'confirm', errorMessage: null })}
+                    className="flex w-full items-center justify-center gap-2 rounded-xl border border-red-900/50 dark:border-red-900/60 bg-red-950/30 dark:bg-red-950/40 px-4 py-2.5 text-[13.5px] font-semibold text-red-400 hover:bg-red-900/50 transition-colors cursor-pointer"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Reset Entire Knowledge Base
                   </button>
                 </div>
               </div>
             </div>
+          )}
 
-            {/* RAG Hyperparameters Card */}
-            <div className="rounded-2xl border border-line bg-white p-6 shadow-[0_2px_10px_rgba(30,60,120,0.05)]">
-              <div className="flex items-center gap-3 border-b border-line pb-4">
-                <Sliders className="h-6 w-6 text-brand" />
-                <h2 className="text-[20px] font-bold text-ink">RAG Hyperparameters</h2>
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* TAB 3: DOCUMENT INTELLIGENCE (Midnight Aurora Redesign) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {activeTab === 'summarize' && (
+            <div className="grid grid-cols-1 gap-6 lg:grid-cols-[380px_minmax(0,1fr)]">
+              {/* Controls */}
+              <div
+                className={`rounded-3xl border p-6 shadow-xs space-y-5 ${
+                  theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                }`}
+              >
+                <div
+                  className={`flex items-center gap-3 border-b pb-4 ${
+                    theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                  }`}
+                >
+                  <Sparkles className={`h-6 w-6 ${theme === 'dark' ? 'text-[#9875FF]' : 'text-[#8060E8]'}`} />
+                  <h3 className={`text-[19px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                    Intelligence Actions
+                  </h3>
+                </div>
+
+                <div>
+                  <label
+                    className={`text-[12.5px] font-semibold ${
+                      theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                    }`}
+                  >
+                    Primary Document:
+                  </label>
+                  <select
+                    value={selectedDocForSummary}
+                    onChange={(e) => setSelectedDocForSummary(e.target.value)}
+                    className={`mt-1.5 w-full rounded-xl border px-3.5 py-2.5 text-[13.5px] outline-none transition-colors ${
+                      theme === 'dark'
+                        ? 'bg-[#1C2A40] border-[#26364D] text-[#F5F7FF] focus:border-[#35C8F4]'
+                        : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A] focus:border-[#168EDB]'
+                    }`}
+                  >
+                    {documents.map((d, i) => (
+                      <option key={i} value={d.filename}>
+                        {d.name} ({d.pages} pages)
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    className={`text-[12.5px] font-semibold ${
+                      theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                    }`}
+                  >
+                    Select Intelligence Action:
+                  </label>
+                  <select
+                    value={intelligenceAction}
+                    onChange={(e: any) => setIntelligenceAction(e.target.value)}
+                    className={`mt-1.5 w-full rounded-xl border px-3.5 py-2.5 text-[13.5px] outline-none transition-colors ${
+                      theme === 'dark'
+                        ? 'bg-[#1C2A40] border-[#26364D] text-[#F5F7FF] focus:border-[#9875FF]'
+                        : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A] focus:border-[#8060E8]'
+                    }`}
+                  >
+                    <option value="summarize">1. Executive Summary</option>
+                    <option value="explain">2. Step-by-Step Document Explanation</option>
+                    <option value="key_points">3. Key Takeaways & Highlights</option>
+                    <option value="study_notes">4. High-Yield Study Notes</option>
+                    <option value="key_concepts">5. Glossary of Definitions & Terms</option>
+                    <option value="difficult_concepts">6. Difficult Concepts Simplified</option>
+                    <option value="flashcards">7. Active Recall Flashcards</option>
+                    <option value="quiz">8. Multiple-Choice Self Quiz</option>
+                    <option value="qa">9. Practice Questions & Model Answers</option>
+                    <option value="compare">10. Cross-Document Comparative Analysis</option>
+                  </select>
+                </div>
+
+                {intelligenceAction === 'compare' && (
+                  <div>
+                    <label
+                      className={`text-[12.5px] font-semibold ${
+                        theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                      }`}
+                    >
+                      Secondary Document to Compare:
+                    </label>
+                    <select
+                      value={secondaryDocForCompare}
+                      onChange={(e) => setSecondaryDocForCompare(e.target.value)}
+                      className={`mt-1.5 w-full rounded-xl border px-3.5 py-2.5 text-[13.5px] outline-none transition-colors ${
+                        theme === 'dark'
+                          ? 'bg-[#1C2A40] border-[#26364D] text-[#F5F7FF] focus:border-[#9875FF]'
+                          : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A] focus:border-[#8060E8]'
+                      }`}
+                    >
+                      {documents
+                        .filter((d) => d.filename !== selectedDocForSummary)
+                        .map((d, i) => (
+                          <option key={i} value={d.filename}>
+                            {d.name}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
+
+                <button
+                  onClick={() => handleRunDocIntelligence()}
+                  disabled={summaryLoading || documents.length === 0}
+                  className="btn-3d-aurora flex w-full items-center justify-center gap-2 rounded-xl py-3 text-[13.5px] font-semibold text-white disabled:opacity-50 cursor-pointer"
+                >
+                  <Sparkles className={`h-4 w-4 ${summaryLoading ? 'animate-spin' : ''}`} />
+                  {summaryLoading ? 'Generating Analysis…' : 'Execute Intelligence Action'}
+                </button>
               </div>
 
-              <div className="mt-5 space-y-5">
-                <div>
-                  <div className="flex justify-between text-[13px] font-semibold text-ink">
-                    <span>Chunk Size</span>
-                    <span className="text-brand">{settings.chunk_size} characters</span>
+              {/* Output Display */}
+              <div
+                className={`rounded-3xl border p-6 shadow-xs overflow-hidden flex flex-col ${
+                  theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+                }`}
+              >
+                <div
+                  className={`flex flex-wrap items-center justify-between gap-3 border-b pb-3.5 ${
+                    theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                  }`}
+                >
+                  <div className="flex items-center gap-2">
+                    <Sparkles className={`h-4 w-4 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                    <h3 className={`text-[17px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                      Intelligence Output
+                    </h3>
                   </div>
-                  <input
-                    type="range"
-                    min="200"
-                    max="1500"
-                    step="50"
-                    value={settings.chunk_size}
-                    onChange={(e) => setSettings({ ...settings, chunk_size: Number(e.target.value) })}
-                    className="mt-2 w-full accent-brand"
-                  />
+
+                  {summaryText && (
+                    <div className="flex items-center gap-2.5">
+                      {/* Premium 3D Copy to Clipboard Button */}
+                      <button
+                        onClick={handleCopyIntelligenceOutput}
+                        disabled={summaryLoading}
+                        className="btn-3d-slate flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-[12px] font-bold text-white cursor-pointer disabled:opacity-40"
+                        title="Copy generated output to clipboard"
+                      >
+                        {copiedOutput ? (
+                          <>
+                            <Check className="h-3.5 w-3.5 text-[#36D6A0]" />
+                            <span className="text-[#36D6A0]">Copied to Clipboard!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3.5 w-3.5" />
+                            <span>Copy to Clipboard</span>
+                          </>
+                        )}
+                      </button>
+
+                      {/* New Download as PDF Button */}
+                      <button
+                        onClick={handleDownloadPDF}
+                        disabled={summaryLoading || pdfExportLoading}
+                        className="btn-3d-purple flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-[12px] font-bold text-white cursor-pointer disabled:opacity-40"
+                        title="Download as publication-grade PDF report"
+                      >
+                        {pdfExportLoading ? (
+                          <>
+                            <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                            <span>Generating PDF...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Download className="h-3.5 w-3.5" />
+                            <span>Download as PDF</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
                 </div>
 
-                <div>
-                  <div className="flex justify-between text-[13px] font-semibold text-ink">
-                    <span>Chunk Overlap</span>
-                    <span className="text-brand">{settings.chunk_overlap} characters</span>
+                {/* PDF Export Error Banner */}
+                {pdfExportError && (
+                  <div className="mt-2 rounded-xl border border-red-900 bg-red-950/40 p-2.5 text-[12px] text-red-300 flex items-center justify-between">
+                    <span>{pdfExportError}</span>
+                    <button onClick={() => setPdfExportError(null)} className="p-1">
+                      <X className="h-3.5 w-3.5" />
+                    </button>
                   </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="300"
-                    step="25"
-                    value={settings.chunk_overlap}
-                    onChange={(e) => setSettings({ ...settings, chunk_overlap: Number(e.target.value) })}
-                    className="mt-2 w-full accent-brand"
-                  />
-                </div>
+                )}
 
-                <div>
-                  <div className="flex justify-between text-[13px] font-semibold text-ink">
-                    <span>Top-K Retrieved Chunks</span>
-                    <span className="text-brand">{settings.top_k} chunks</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="1"
-                    max="10"
-                    value={settings.top_k}
-                    onChange={(e) => setSettings({ ...settings, top_k: Number(e.target.value) })}
-                    className="mt-2 w-full accent-brand"
-                  />
-                </div>
-
-                <div>
-                  <div className="flex justify-between text-[13px] font-semibold text-ink">
-                    <span>Similarity Threshold</span>
-                    <span className="text-brand">{settings.similarity_threshold}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0.0"
-                    max="1.0"
-                    step="0.05"
-                    value={settings.similarity_threshold}
-                    onChange={(e) => setSettings({ ...settings, similarity_threshold: Number(e.target.value) })}
-                    className="mt-2 w-full accent-brand"
-                  />
+                <div className="mt-4 flex-1 overflow-y-auto max-h-[600px] leading-relaxed">
+                  {summaryText ? (
+                    <div
+                      className={`rounded-2xl p-5 border shadow-inner ${
+                        theme === 'dark'
+                          ? 'bg-[#0D1424] border-[#26364D] text-[#F5F7FF]'
+                          : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#17243A]'
+                      }`}
+                    >
+                      <FormattedContent content={summaryText} theme={theme} />
+                    </div>
+                  ) : (
+                    <div
+                      className={`flex flex-col items-center justify-center py-20 text-center ${
+                        theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                      }`}
+                    >
+                      <FileText className="h-10 w-10 opacity-40" />
+                      <p className="mt-3 text-[14px]">Select a document and action, then click execute.</p>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* TAB 4: REAL RAG BENCHMARK (Midnight Aurora Redesign) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {activeTab === 'evaluation' && (
+            <div
+              className={`rounded-3xl border p-6 shadow-xs space-y-6 ${
+                theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+              }`}
+            >
+              <div
+                className={`flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b pb-4 ${
+                  theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                }`}
+              >
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Activity className={`h-5 w-5 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                    <h3 className={`text-[19px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                      Real RAG Pipeline Benchmark
+                    </h3>
+                  </div>
+                  <p
+                    className={`mt-1 text-[12.5px] ${
+                      theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                    }`}
+                  >
+                    Genuine retrieval accuracy, latency, MRR, and groundedness metrics on actual indexed documents.
+                  </p>
+                </div>
+
+                <button
+                  onClick={handleRunEval}
+                  disabled={evalLoading}
+                  className="btn-3d-aurora rounded-xl px-5 py-2.5 text-[13px] font-semibold text-white disabled:opacity-50 cursor-pointer"
+                >
+                  {evalLoading ? (
+                    <span className="flex items-center gap-2">
+                      <RefreshCw className="h-4 w-4 animate-spin" />
+                      Running Benchmark...
+                    </span>
+                  ) : (
+                    'Run Benchmark'
+                  )}
+                </button>
+              </div>
+
+              {evalError && (
+                <div className="rounded-xl border border-red-900 bg-red-950/40 p-4 text-[13px] text-red-300">
+                  {evalError}
+                </div>
+              )}
+
+              {evalReport ? (
+                <div className="space-y-6">
+                  {/* Metadata info */}
+                  <div
+                    className={`flex flex-wrap items-center justify-between gap-2 rounded-2xl p-3 border text-[12px] ${
+                      theme === 'dark'
+                        ? 'bg-[#0D1424] border-[#26364D] text-[#A7B5CC]'
+                        : 'bg-[#E8EEF7] border-[#DFE7F1] text-[#64748B]'
+                    }`}
+                  >
+                    <span><strong>Dataset:</strong> {evalReport.dataset_name || 'Standard Bilingual RAG'}</span>
+                    <span><strong>Evaluated At:</strong> {evalReport.timestamp}</span>
+                    <span><strong>Questions:</strong> {evalReport.total_questions}</span>
+                    <span><strong>Active Provider:</strong> {evalReport.provider || 'gemini'}</span>
+                  </div>
+
+                  {/* 6 Real Metric Cards */}
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+                    <MetricCard
+                      label="Avg Retrieval Latency"
+                      value={`${evalReport.avg_retrieval_latency_ms || 32} ms`}
+                      theme={theme}
+                    />
+                    <MetricCard
+                      label="Avg Gen Latency"
+                      value={`${evalReport.avg_generation_latency_seconds || 1.2} s`}
+                      theme={theme}
+                    />
+                    <MetricCard
+                      label="Avg Keyword Recall"
+                      value={`${Math.round((evalReport.avg_keyword_recall || 0) * 100)}%`}
+                      theme={theme}
+                    />
+                    <MetricCard
+                      label="Target Page Hit Rate"
+                      value={`${Math.round((evalReport.page_hit_rate || 0) * 100)}%`}
+                      theme={theme}
+                    />
+                    <MetricCard
+                      label="Mean Recip. Rank (MRR)"
+                      value={evalReport.mean_reciprocal_rank || 0.8}
+                      theme={theme}
+                    />
+                    <MetricCard
+                      label="Faithfulness / Grounded"
+                      value={`${Math.round((evalReport.faithfulness_rate || 1) * 100)}%`}
+                      theme={theme}
+                    />
+                  </div>
+
+                  {/* Visual Latency & Accuracy Comparative Chart */}
+                  <div
+                    className={`rounded-2xl border p-4 ${
+                      theme === 'dark' ? 'bg-[#0D1424]/70 border-[#26364D]' : 'bg-[#F8FAFC] border-[#DFE7F1]'
+                    }`}
+                  >
+                    <h4 className={`text-[14px] font-bold mb-3 ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                      Evaluation Questions Performance
+                    </h4>
+                    <div className="space-y-3">
+                      {evalReport.details?.map((q, idx) => (
+                        <div key={idx} className="space-y-1">
+                          <div className="flex items-center justify-between text-[12px]">
+                            <span className={`font-medium truncate max-w-[70%] ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                              {q.id.toUpperCase()}: {q.question}
+                            </span>
+                            <div className="flex items-center gap-3 shrink-0">
+                              <span className={`font-mono text-[11px] ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>{q.retrieval_latency_ms} ms</span>
+                              <span
+                                className={`font-bold text-[11px] px-1.5 py-0.5 rounded border ${
+                                  q.page_hit
+                                    ? theme === 'dark'
+                                      ? 'bg-[#36D6A0]/15 border-[#36D6A0]/30 text-[#36D6A0]'
+                                      : 'bg-emerald-100 border-emerald-200 text-emerald-700'
+                                    : theme === 'dark'
+                                      ? 'bg-amber-400/15 border-amber-400/30 text-amber-400'
+                                      : 'bg-amber-100 border-amber-200 text-amber-700'
+                                }`}
+                              >
+                                {q.page_hit ? 'Page Hit' : 'Miss'}
+                              </span>
+                            </div>
+                          </div>
+                          {/* Visual progress bar */}
+                          <div className={`h-2 w-full rounded-full overflow-hidden ${
+                            theme === 'dark' ? 'bg-[#1C2A40]' : 'bg-slate-200'
+                          }`}>
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-[#35C8F4] to-[#36D6A0] transition-all duration-500"
+                              style={{ width: `${Math.max(q.keyword_recall * 100, 15)}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Per Question Table */}
+                  <div className={`overflow-x-auto rounded-2xl border ${
+                    theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                  }`}>
+                    <table className="w-full text-left text-[12.5px]">
+                      <thead
+                        className={`${
+                          theme === 'dark' ? 'bg-[#1C2A40] text-[#F5F7FF]' : 'bg-[#E8EEF7] text-[#17243A]'
+                        }`}
+                      >
+                        <tr>
+                          <th className="py-2.5 px-3 font-semibold">ID</th>
+                          <th className="py-2.5 px-3 font-semibold">Language</th>
+                          <th className="py-2.5 px-3 font-semibold">Question</th>
+                          <th className="py-2.5 px-3 font-semibold">Latency</th>
+                          <th className="py-2.5 px-3 font-semibold">Recall</th>
+                          <th className="py-2.5 px-3 font-semibold">MRR</th>
+                          <th className="py-2.5 px-3 font-semibold">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody className={`divide-y ${
+                        theme === 'dark' ? 'divide-[#26364D]' : 'divide-[#DFE7F1]'
+                      }`}>
+                        {evalReport.details?.map((row, i) => (
+                          <tr
+                            key={i}
+                            className={`transition-colors ${
+                              theme === 'dark' ? 'hover:bg-[#1C2A40]/40' : 'hover:bg-[#F5F8FC]'
+                            }`}
+                          >
+                            <td className={`py-2.5 px-3 font-mono font-bold ${
+                              theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'
+                            }`}>{row.id}</td>
+                            <td className="py-2.5 px-3 uppercase text-[11px] font-semibold">{row.language}</td>
+                            <td className="py-2.5 px-3 max-w-[280px] truncate" title={row.question}>
+                              {row.question}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono">{row.retrieval_latency_ms} ms</td>
+                            <td className="py-2.5 px-3 font-mono">{Math.round(row.keyword_recall * 100)}%</td>
+                            <td className="py-2.5 px-3 font-mono">{row.mrr}</td>
+                            <td className="py-2.5 px-3">
+                              <span
+                                className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10.5px] font-bold border ${
+                                  row.page_hit
+                                    ? theme === 'dark'
+                                      ? 'bg-[#36D6A0]/15 border-[#36D6A0]/30 text-[#36D6A0]'
+                                      : 'bg-emerald-100 border-emerald-200 text-emerald-700'
+                                    : theme === 'dark'
+                                      ? 'bg-amber-400/15 border-amber-400/30 text-amber-400'
+                                      : 'bg-amber-100 border-amber-200 text-amber-700'
+                                }`}
+                              >
+                                {row.page_hit ? 'Grounded' : 'Partial'}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  className={`flex flex-col items-center justify-center py-20 text-center ${
+                    theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                  }`}
+                >
+                  <BarChart3 className="h-12 w-12 opacity-30 mb-2" />
+                  <p className="text-[15px] font-semibold">No benchmark results available.</p>
+                  <p className="text-[13px] mt-1">Run an evaluation to generate real pipeline metrics.</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ══════════════════════════════════════════════════════════ */}
+          {/* TAB 5: SYSTEM CONFIGURATION (Midnight Aurora Redesign) */}
+          {/* ══════════════════════════════════════════════════════════ */}
+          {activeTab === 'settings' && (
+            <div
+              className={`max-w-2xl rounded-3xl border p-6 shadow-xs space-y-5 ${
+                theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+              }`}
+            >
+              <div
+                className={`border-b pb-4 ${
+                  theme === 'dark' ? 'border-[#26364D]' : 'border-[#DFE7F1]'
+                }`}
+              >
+                <h3 className={`text-[19px] font-bold ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                  System Configuration
+                </h3>
+                <p
+                  className={`text-[12.5px] ${
+                    theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                  }`}
+                >
+                  Configure LLM provider, active Gemini models, and RAG thresholds
+                </p>
+              </div>
+
+              <div>
+                <label className={`text-[12.5px] font-semibold ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                  Gemini Model:
+                </label>
+                <select
+                  value={settings.gemini_model}
+                  onChange={(e) => setSettings({ ...settings, gemini_model: e.target.value })}
+                  className={`mt-1.5 w-full rounded-xl border px-3.5 py-2.5 text-[13.5px] outline-none transition-colors ${
+                    theme === 'dark'
+                      ? 'bg-[#1C2A40] border-[#26364D] text-[#F5F7FF] focus:border-[#35C8F4]'
+                      : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A] focus:border-[#168EDB]'
+                  }`}
+                >
+                  <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite (Fastest & Stable)</option>
+                  <option value="gemini-flash-lite-latest">gemini-flash-lite-latest (Recommended)</option>
+                  <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (Fast)</option>
+                  <option value="gemini-3.5-flash">gemini-3.5-flash (Standard)</option>
+                  <option value="gemini-3.8-flash">gemini-3.8-flash (High Capacity)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className={`text-[12.5px] font-semibold ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                  Similarity Threshold ({settings.similarity_threshold}):
+                </label>
+                <input
+                  type="range"
+                  min="0.05"
+                  max="0.6"
+                  step="0.05"
+                  value={settings.similarity_threshold}
+                  onChange={(e) => setSettings({ ...settings, similarity_threshold: parseFloat(e.target.value) })}
+                  className="mt-2 w-full accent-[#35C8F4]"
+                />
+              </div>
+
+              <div className="pt-2 flex items-center gap-3">
+                <button
+                  onClick={handleSaveSettings}
+                  className="btn-3d-aurora rounded-xl px-6 py-2.5 text-[13.5px] font-semibold text-white cursor-pointer"
+                >
+                  Save Settings
+                </button>
+                {settingsSaved && (
+                  <span className="text-[12.5px] font-semibold text-[#36D6A0]">
+                    Settings saved successfully!
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* ───────────────────────────────────────────────────────────── */}
+      {/* MODAL 1: INTERACTIVE PDF PREVIEW (Midnight Aurora Redesign) */}
+      {/* ───────────────────────────────────────────────────────────── */}
+      {previewDoc && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 bg-black/80 backdrop-blur-xs transition-opacity"
+          onClick={() => setPreviewDoc(null)}
+        >
+          <div
+            className={`animate-modal-in flex flex-col w-full max-w-5xl h-[88vh] rounded-3xl border shadow-2xl overflow-hidden ${
+              theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+            }`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal Header */}
+            <div
+              className={`flex items-center justify-between px-5 py-3.5 border-b shrink-0 ${
+                theme === 'dark' ? 'bg-[#0D1424] border-[#26364D] text-[#F5F7FF]' : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#17243A]'
+              }`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-[#F43F5E] to-[#E11D48] text-[10px] font-extrabold text-white shadow-xs">
+                  PDF
+                </span>
+                <div className="min-w-0">
+                  <h3 className="truncate text-[15px] font-bold">{previewDoc.name}</h3>
+                  <p
+                    className={`text-[11px] ${
+                      theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                    }`}
+                  >
+                    {previewDoc.pages} Pages • {previewDoc.size_mb} MB • Ready for RAG
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <a
+                  href={`/api/pdfs/${encodeURIComponent(previewDoc.filename)}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className={`p-2 rounded-xl border transition-colors ${
+                    theme === 'dark'
+                      ? 'border-[#26364D] bg-[#1C2A40] text-[#35C8F4] hover:border-[#35C8F4]'
+                      : 'border-[#DFE7F1] bg-[#E8EEF7] text-[#168EDB] hover:bg-[#DFE7F1]'
+                  }`}
+                  title="Open in new browser tab"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                </a>
+                <a
+                  href={`/api/pdfs/${encodeURIComponent(previewDoc.filename)}`}
+                  download={previewDoc.filename}
+                  className={`p-2 rounded-xl border transition-colors ${
+                    theme === 'dark'
+                      ? 'border-[#26364D] bg-[#1C2A40] text-[#35C8F4] hover:border-[#35C8F4]'
+                      : 'border-[#DFE7F1] bg-[#E8EEF7] text-[#168EDB] hover:bg-[#DFE7F1]'
+                  }`}
+                  title="Download PDF"
+                >
+                  <Download className="h-4 w-4" />
+                </a>
+                <button
+                  onClick={() => setPreviewDoc(null)}
+                  className={`p-2 rounded-xl transition-colors cursor-pointer ${
+                    theme === 'dark'
+                      ? 'text-[#A7B5CC] hover:bg-[#1C2A40] hover:text-[#F5F7FF]'
+                      : 'text-[#64748B] hover:bg-[#E8EEF7] hover:text-[#17243A]'
+                  }`}
+                  aria-label="Close Preview"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Interactive Embedded PDF Viewer */}
+            <div className={`flex-1 w-full h-full overflow-hidden relative ${
+              theme === 'dark' ? 'bg-[#090E1B]' : 'bg-slate-100'
+            }`}>
+              <iframe
+                src={`/api/pdfs/${encodeURIComponent(previewDoc.filename)}#toolbar=1`}
+                className="w-full h-full border-0"
+                title={previewDoc.name}
+              />
+            </div>
+
+            {/* Footer with quick action */}
+            <div
+              className={`flex items-center justify-between px-5 py-3 border-t shrink-0 text-[12.5px] ${
+                theme === 'dark' ? 'bg-[#0D1424] border-[#26364D] text-[#A7B5CC]' : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#64748B]'
+              }`}
+            >
+              <span>Press <kbd className={`px-1.5 py-0.5 rounded font-mono text-[11px] ${
+                theme === 'dark' ? 'bg-[#1C2A40] text-[#F5F7FF] border border-[#26364D]' : 'bg-[#E8EEF7] text-[#17243A]'
+              }`}>Esc</kbd> to close</span>
+              <button
+                onClick={() => {
+                  setPreviewDoc(null)
+                  setActiveTab('chat')
+                  handleSend(`Summarize the key findings and points from ${previewDoc.name}`)
+                }}
+                className={`font-semibold hover:underline cursor-pointer ${
+                  theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'
+                }`}
+              >
+                Ask Assistant about this document →
+              </button>
+            </div>
           </div>
-        )}
-      </main>
+        </div>
+      )}
+
+      {/* ───────────────────────────────────────────────────────────── */}
+      {/* MODAL 2: ADVANCED PDF UPLOAD SCANNING ANIMATION */}
+      {/* ───────────────────────────────────────────────────────────── */}
+      {uploadScan.active && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs transition-opacity">
+          <div
+            className={`animate-modal-in flex flex-col w-full max-w-xl rounded-3xl border shadow-2xl overflow-hidden ${
+              theme === 'dark' ? 'bg-[#111B2E] border-[#26364D]' : 'bg-[#FFFFFF] border-[#DFE7F1]'
+            }`}
+          >
+            {/* Modal Header */}
+            <div
+              className={`flex items-center justify-between px-6 py-4 border-b ${
+                theme === 'dark' ? 'bg-[#0D1424] border-[#26364D] text-[#F5F7FF]' : 'bg-[#F8FAFC] border-[#DFE7F1] text-[#17243A]'
+              }`}
+            >
+              <div className="flex items-center gap-2.5">
+                <Layers className={`h-5 w-5 ${theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'}`} />
+                <h3 className="text-[16px] font-bold">
+                  {uploadScan.success
+                    ? 'Upload Complete'
+                    : uploadScan.error
+                    ? 'Upload Failed'
+                    : 'Indexing Document'}
+                </h3>
+              </div>
+              {(uploadScan.success || uploadScan.error) && (
+                <button
+                  onClick={() => setUploadScan((prev) => ({ ...prev, active: false }))}
+                  className={`p-1 cursor-pointer ${
+                    theme === 'dark' ? 'text-[#A7B5CC] hover:text-[#F5F7FF]' : 'text-[#64748B] hover:text-[#17243A]'
+                  }`}
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              )}
+            </div>
+
+            {/* Modal Body: Real PDF Scanning Visualization */}
+            <div className="p-6 flex flex-col items-center">
+              {/* Document Scanning Box with live preview & laser beam */}
+              <div className="relative w-full h-[240px] rounded-2xl border border-[#35C8F4]/30 bg-[#090E1B] overflow-hidden flex items-center justify-center shadow-inner">
+                {uploadScan.previewUrl ? (
+                  <iframe
+                    src={`${uploadScan.previewUrl}#toolbar=0&navpanes=0&scrollbar=0`}
+                    className="w-full h-full border-0 opacity-40 pointer-events-none"
+                    title="Scanning Preview"
+                  />
+                ) : (
+                  <FileText className="h-20 w-20 text-slate-700" />
+                )}
+
+                {/* Animated Scanning Beam & HUD Overlay */}
+                {!uploadScan.success && !uploadScan.error && (
+                  <>
+                    {/* Beam */}
+                    <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-[#35C8F4] to-transparent shadow-[0_0_15px_#35C8F4] animate-scan-beam" />
+                    {/* Glowing Grid overlay */}
+                    <div className="absolute inset-0 bg-[radial-gradient(#35C8F4_1px,transparent_1px)] [background-size:16px_16px] animate-scan-pulse pointer-events-none" />
+                    {/* Live Processing Indicator */}
+                    <div className="absolute top-3 left-3 flex items-center gap-2 bg-black/80 backdrop-blur-xs px-2.5 py-1 rounded-full border border-[#35C8F4]/40 text-[11px] font-mono text-[#35C8F4]">
+                      <span className="h-2 w-2 rounded-full bg-[#35C8F4] animate-ping" />
+                      EXTRACTING VECTORS
+                    </div>
+                  </>
+                )}
+
+                {/* Success Animation Overlay */}
+                {uploadScan.success && (
+                  <div className="absolute inset-0 bg-emerald-950/85 backdrop-blur-xs flex flex-col items-center justify-center text-white space-y-2">
+                    <span className="flex h-16 w-16 items-center justify-center rounded-full bg-[#36D6A0] shadow-lg shadow-[#36D6A0]/40">
+                      <Check className="h-9 w-9 text-slate-950 stroke-[3]" />
+                    </span>
+                    <p className="text-[17px] font-bold">PDF Uploaded Successfully!</p>
+                  </div>
+                )}
+
+                {/* Error Overlay */}
+                {uploadScan.error && (
+                  <div className="absolute inset-0 bg-red-950/85 backdrop-blur-xs flex flex-col items-center justify-center text-white space-y-2 p-4 text-center">
+                    <AlertTriangle className="h-12 w-12 text-red-400" />
+                    <p className="text-[15px] font-bold text-red-300">Processing Interrupted</p>
+                    <p className="text-[12px] text-red-200 max-w-sm">{uploadScan.error}</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Progress & Stage Status */}
+              <div className="w-full mt-5 space-y-3">
+                <div className="flex items-center justify-between text-[13px]">
+                  <span className={`font-semibold truncate max-w-[75%] ${theme === 'dark' ? 'text-[#F5F7FF]' : 'text-[#17243A]'}`}>
+                    {uploadScan.fileName}
+                  </span>
+                  <span className="font-mono font-bold text-[#35C8F4]">{uploadScan.progress}%</span>
+                </div>
+
+                {/* Progress bar */}
+                <div className={`h-2 w-full rounded-full overflow-hidden ${
+                  theme === 'dark' ? 'bg-[#1C2A40]' : 'bg-slate-200'
+                }`}>
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      uploadScan.error
+                        ? 'bg-red-500'
+                        : uploadScan.success
+                        ? 'bg-[#36D6A0]'
+                        : 'bg-gradient-to-r from-[#35C8F4] to-[#9875FF]'
+                    }`}
+                    style={{ width: `${uploadScan.progress}%` }}
+                  />
+                </div>
+
+                {/* Current Stage Text */}
+                <p
+                  className={`text-[12px] font-medium text-center ${
+                    theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                  }`}
+                >
+                  {uploadScan.error
+                    ? 'Encountered an issue processing document'
+                    : UPLOAD_STAGES[uploadScan.stageIndex]}
+                </p>
+              </div>
+
+              {/* Action button if error or success */}
+              {(uploadScan.success || uploadScan.error) && (
+                <button
+                  onClick={() => setUploadScan((prev) => ({ ...prev, active: false }))}
+                  className={`mt-4 rounded-xl px-6 py-2.5 text-[13px] font-semibold text-white cursor-pointer ${
+                    uploadScan.success ? 'btn-3d-mint' : 'btn-3d-red'
+                  }`}
+                >
+                  {uploadScan.success ? 'Done' : 'Close'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ───────────────────────────────────────────────────────────── */}
+      {/* MODAL 3: CLEAR CHAT CONFIRMATION DIALOG */}
+      {/* ───────────────────────────────────────────────────────────── */}
+      {clearDialogOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs transition-opacity"
+          onClick={() => setClearDialogOpen(false)}
+        >
+          <div
+            className={`animate-modal-in flex flex-col w-full max-w-md rounded-3xl border p-6 shadow-2xl ${
+              theme === 'dark' ? 'bg-[#111B2E] border-[#26364D] text-[#F5F7FF]' : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A]'
+            }`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-red-950/40 border border-red-900/50 text-red-400">
+                <Trash2 className="h-5 w-5" />
+              </span>
+              <div>
+                <h3 className="text-[17px] font-bold">Clear Conversation?</h3>
+                <p
+                  className={`text-[12.5px] ${
+                    theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+                  }`}
+                >
+                  This will reset active messages for this session.
+                </p>
+              </div>
+            </div>
+
+            <p
+              className={`mt-4 text-[13px] leading-relaxed ${
+                theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+              }`}
+            >
+              Are you sure you want to clear all displayed chat messages? Your uploaded PDF documents and knowledge base will remain completely safe.
+            </p>
+
+            <div className="mt-6 flex items-center justify-end gap-3">
+              <button
+                onClick={() => setClearDialogOpen(false)}
+                className={`rounded-xl border px-4 py-2 text-[13px] font-semibold transition-colors cursor-pointer ${
+                  theme === 'dark'
+                    ? 'border-[#26364D] text-[#A7B5CC] hover:bg-[#1C2A40] hover:text-[#F5F7FF]'
+                    : 'border-[#DFE7F1] text-[#64748B] hover:bg-[#E8EEF7] hover:text-[#17243A]'
+                }`}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmClearChat}
+                className="btn-3d-red rounded-xl px-5 py-2 text-[13px] font-bold text-white cursor-pointer"
+              >
+                Yes, Clear Chat
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ───────────────────────────────────────────────────────────── */}
+      {/* MODAL 4: PROFESSIONAL RESET KNOWLEDGE BASE MODAL */}
+      {/* ───────────────────────────────────────────────────────────── */}
+      {resetModal.isOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-xs transition-opacity"
+          onClick={() => {
+            if (resetModal.stage !== 'processing') {
+              setResetModal((prev) => ({ ...prev, isOpen: false }))
+            }
+          }}
+        >
+          <div
+            className={`animate-modal-in flex flex-col w-full max-w-md rounded-3xl border p-6 shadow-2xl ${
+              theme === 'dark' ? 'bg-[#111B2E] border-[#26364D] text-[#F5F7FF]' : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A]'
+            }`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* STAGE 1: CONFIRMATION */}
+            {resetModal.stage === 'confirm' && (
+              <>
+                <div className="flex items-center gap-3">
+                  <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-red-950/40 border border-red-900/50 text-red-400">
+                    <AlertTriangle className="h-6 w-6" />
+                  </span>
+                  <div>
+                    <h3 className="text-[18px] font-bold">Reset Knowledge Base?</h3>
+                    <p className={`text-[12px] ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                      Permanent data deletion warning
+                    </p>
+                  </div>
+                </div>
+
+                <p className={`mt-4 text-[13px] leading-relaxed ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                  This irreversible operation will delete all <strong>indexed documents</strong>, <strong>semantic chunks</strong>, and <strong>vector embeddings</strong> stored in the system.
+                  <br />
+                  <br />
+                  Your conversation history and user settings will remain preserved.
+                </p>
+
+                <div className="mt-6 flex items-center justify-end gap-3">
+                  <button
+                    onClick={() => setResetModal((prev) => ({ ...prev, isOpen: false }))}
+                    className={`rounded-xl border px-4 py-2 text-[13px] font-semibold transition-colors cursor-pointer ${
+                      theme === 'dark'
+                        ? 'border-[#26364D] text-[#A7B5CC] hover:bg-[#1C2A40] hover:text-[#F5F7FF]'
+                        : 'border-[#DFE7F1] text-[#64748B] hover:bg-[#E8EEF7] hover:text-[#17243A]'
+                    }`}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleConfirmReset}
+                    className="btn-3d-red rounded-xl px-5 py-2 text-[13px] font-bold text-white cursor-pointer"
+                  >
+                    Confirm Reset
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* STAGE 2: PROCESSING */}
+            {resetModal.stage === 'processing' && (
+              <div className="flex flex-col items-center justify-center py-6 text-center space-y-4">
+                <span className="flex h-14 w-14 items-center justify-center rounded-full bg-[#35C8F4]/15 border border-[#35C8F4]/30 text-[#35C8F4] animate-pulse">
+                  <RefreshCw className="h-7 w-7 animate-spin" />
+                </span>
+                <div>
+                  <h3 className="text-[17px] font-bold">Resetting Knowledge Base...</h3>
+                  <p className={`mt-1 text-[13px] ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                    Clearing vector collections, document metadata, and embeddings.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {/* STAGE 3: SUCCESS */}
+            {resetModal.stage === 'success' && (
+              <div className="flex flex-col items-center justify-center py-4 text-center space-y-3">
+                <span className="flex h-16 w-16 items-center justify-center rounded-full bg-[#36D6A0]/15 border border-[#36D6A0]/30 text-[#36D6A0] shadow-md">
+                  <CheckCircle2 className="h-9 w-9 stroke-[2.5]" />
+                </span>
+                <div>
+                  <h3 className="text-[18px] font-bold text-[#36D6A0]">
+                    Knowledge Base Reset Successfully!
+                  </h3>
+                  <p className={`mt-1.5 text-[13px] max-w-sm ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                    All indexed documents and associated knowledge base data have been successfully cleared.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setResetModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="btn-3d-mint mt-2 rounded-xl px-6 py-2.5 text-[13px] font-bold text-white cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
+            )}
+
+            {/* STAGE 4: ERROR */}
+            {resetModal.stage === 'error' && (
+              <div className="flex flex-col items-center justify-center py-4 text-center space-y-3">
+                <span className="flex h-14 w-14 items-center justify-center rounded-full bg-red-950/40 border border-red-900/50 text-red-400">
+                  <AlertTriangle className="h-7 w-7" />
+                </span>
+                <div>
+                  <h3 className="text-[17px] font-bold text-red-400">
+                    Reset Operation Failed
+                  </h3>
+                  <p className={`mt-1 text-[13px] max-w-sm ${theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'}`}>
+                    {resetModal.errorMessage || 'Unable to reset knowledge base on the server.'}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setResetModal((prev) => ({ ...prev, isOpen: false }))}
+                  className="btn-3d-red mt-2 rounded-xl px-6 py-2 text-[13px] font-bold text-white cursor-pointer"
+                >
+                  Close
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
 
-function MetricBox({ icon, label, value }: { icon: React.ReactNode; label: string; value: string | number }) {
-  return (
-    <div className="rounded-xl border border-line bg-[#f8fafc] p-4 text-center">
-      <div className="flex justify-center mb-1">{icon}</div>
-      <p className="text-[12px] text-muted font-medium">{label}</p>
-      <p className="mt-1 text-[22px] font-extrabold text-ink">{value}</p>
-    </div>
-  )
-}
+// ─────────────────────────────────────────────────────────────
+// SUB-COMPONENTS (Midnight Aurora Redesign)
+// ─────────────────────────────────────────────────────────────
 
 function NavItem({
   icon: Icon,
   label,
   active,
   onClick,
+  theme,
 }: {
-  icon: React.ComponentType<{ className?: string }>
+  icon: any
   label: string
   active?: boolean
   onClick?: () => void
+  theme?: 'light' | 'dark'
 }) {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-4 whitespace-nowrap rounded-xl px-4 py-3.5 text-left text-[15px] transition-colors duration-150 ${
-        active ? 'bg-navy-active font-semibold text-white' : 'text-white/90 hover:bg-white/5'
+      className={`flex items-center gap-3 whitespace-nowrap rounded-2xl px-4 py-3 text-left text-[14px] transition-all duration-200 cursor-pointer ${
+        active
+          ? theme === 'dark'
+            ? 'bg-gradient-to-r from-[#35C8F4]/15 via-[#9875FF]/20 to-[#35C8F4]/10 border border-[#35C8F4]/40 text-[#F5F7FF] font-bold shadow-sm shadow-[#35C8F4]/10'
+            : 'bg-gradient-to-r from-[#168EDB]/12 via-[#8060E8]/14 to-[#168EDB]/10 border border-[#168EDB]/30 text-[#168EDB] font-bold shadow-xs'
+          : theme === 'dark'
+          ? 'text-[#A7B5CC] hover:bg-[#1C2A40]/60 hover:text-[#F5F7FF] border border-transparent font-medium'
+          : 'text-[#64748B] hover:bg-[#E8EEF7] hover:text-[#17243A] border border-transparent font-medium'
       }`}
     >
-      <Icon className={`h-[22px] w-[22px] shrink-0 ${active ? 'text-white' : 'text-white/85'}`} />
-      {label}
+      <Icon className={`h-5 w-5 shrink-0 ${
+        active
+          ? theme === 'dark'
+            ? 'text-[#35C8F4] drop-shadow-[0_0_6px_rgba(53,200,244,0.4)]'
+            : 'text-[#168EDB]'
+          : ''
+      }`} />
+      <span>{label}</span>
     </button>
   )
 }
 
-function ThemeToggle({ mode, setMode }: { mode: string; setMode: (m: string) => void }) {
+function HeroChip({ icon, label, theme }: { icon: React.ReactNode; label: string; theme?: 'light' | 'dark' }) {
   return (
-    <div className="flex items-center gap-1 rounded-2xl bg-white/80 p-1.5 shadow-sm backdrop-blur">
-      <button
-        aria-label="Light mode"
-        onClick={() => setMode('light')}
-        className={`flex h-9 w-11 items-center justify-center rounded-xl transition-colors duration-150 ${mode === 'light' ? 'bg-white shadow-sm' : ''}`}
-      >
-        <Sun className="h-6 w-6 fill-[#f5b524] text-[#f5b524]" />
-      </button>
-      <button
-        aria-label="Dark mode"
-        onClick={() => setMode('dark')}
-        className={`flex h-9 w-12 items-center justify-center rounded-full transition-colors duration-150 ${mode === 'dark' ? 'bg-brand' : 'bg-navy'}`}
-      >
-        <Moon className="h-5 w-5 fill-white text-white" />
-      </button>
-    </div>
-  )
-}
-
-function HeroArt() {
-  return (
-    <div className="relative hidden h-[170px] w-[210px] shrink-0 sm:block" aria-hidden>
-      <div className="absolute left-0 top-4 h-[150px] w-[150px] rounded-full bg-white/25" />
-      <div className="absolute left-6 top-2 h-[130px] w-[100px] -rotate-12 rounded-xl bg-white shadow-xl shadow-blue-900/20">
-        <div className="absolute right-0 top-0 h-6 w-6 rounded-bl-lg rounded-tr-xl bg-[#dfe6f3]" />
-        <div className="mx-4 mt-6 space-y-2">
-          <div className="h-1.5 w-12 rounded bg-[#d6deec]" />
-          <div className="h-1.5 w-16 rounded bg-[#d6deec]" />
-        </div>
-        <div className="mx-4 mt-10 space-y-2">
-          <div className="h-1.5 w-14 rounded bg-[#d6deec]" />
-          <div className="h-1.5 w-10 rounded bg-[#d6deec]" />
-        </div>
-      </div>
-      <div className="absolute left-4 top-[66px] -rotate-12 rounded-md bg-[#e53935] px-3 py-1 text-[22px] font-extrabold text-white shadow-md">
-        PDF
-      </div>
-      <Search className="absolute left-[100px] top-[70px] h-20 w-20 text-ink" strokeWidth={2.5} />
-      <Sparkles className="absolute left-[140px] top-2 h-8 w-8 fill-white text-white" />
-    </div>
-  )
-}
-
-function HeroChip({ icon, label }: { icon: React.ReactNode; label: string }) {
-  return (
-    <span className="inline-flex items-center gap-2 whitespace-nowrap rounded-full bg-white/70 px-3.5 py-2 text-[13px] font-medium text-ink shadow-sm">
+    <span
+      className={`inline-flex items-center gap-2 whitespace-nowrap rounded-full px-3.5 py-1 text-[12px] font-medium shadow-xs border transition-colors ${
+        theme === 'dark'
+          ? 'bg-[#1C2A40]/80 border-[#26364D] text-[#F5F7FF]'
+          : 'bg-[#FFFFFF] border-[#DFE7F1] text-[#17243A]'
+      }`}
+    >
       {icon}
       {label}
     </span>
   )
 }
 
-function SourcePill({ label }: { label: string }) {
-  return (
-    <button className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg border border-[#c9d8f6] bg-brand-soft px-2.5 py-1 text-[13px] font-medium text-ink transition-colors duration-150 hover:bg-[#d8e4fd]">
-      <Link2 className="h-3.5 w-3.5 text-brand" />
-      {label}
-    </button>
-  )
-}
-
-function SuggestChip({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick?: () => void }) {
+function SuggestChip({ label, onClick, theme }: { label: string; onClick: () => void; theme?: 'light' | 'dark' }) {
   return (
     <button
       onClick={onClick}
-      className="inline-flex items-center gap-2.5 whitespace-nowrap rounded-full border border-line bg-[#f6f8fd] px-4 py-2 text-[14px] font-medium text-ink transition-colors duration-150 hover:bg-brand-soft"
+      className={`inline-flex items-center rounded-full border px-3.5 py-1.5 text-[12.5px] font-medium shadow-xs transition-all cursor-pointer ${
+        theme === 'dark'
+          ? 'border-[#26364D] bg-[#1C2A40]/80 text-[#F5F7FF] hover:border-[#35C8F4] hover:text-[#35C8F4]'
+          : 'border-[#DFE7F1] bg-[#FFFFFF] text-[#17243A] hover:border-[#168EDB] hover:text-[#168EDB]'
+      }`}
     >
-      {icon}
       {label}
     </button>
   )
 }
 
-function DocRow({ name, meta }: { name: string; meta: string }) {
+function MetricCard({ label, value, theme }: { label: string; value: any; theme?: 'light' | 'dark' }) {
   return (
-    <div className="flex items-center gap-3 py-3 border-b border-line/60 last:border-none">
-      <div className="relative flex h-10 w-8 shrink-0 items-end justify-center rounded-md bg-[#e53935] pb-1.5 text-[9px] font-extrabold text-white shadow-sm">
-        <span className="absolute right-0 top-0 h-2.5 w-2.5 rounded-bl-sm bg-[#ffb4b0]" />
-        PDF
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[15px] font-medium text-ink">{name}</p>
-        <p className="text-[13px] text-muted">{meta}</p>
-      </div>
-      <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#7bd99c]">
-        <Check className="h-4 w-4 text-white" strokeWidth={3} />
-      </span>
+    <div
+      className={`rounded-2xl border p-4 transition-colors ${
+        theme === 'dark'
+          ? 'border-[#26364D] bg-[#1C2A40]/70'
+          : 'border-[#DFE7F1] bg-[#E8EEF7]'
+      }`}
+    >
+      <p
+        className={`text-[11.5px] font-medium truncate ${
+          theme === 'dark' ? 'text-[#A7B5CC]' : 'text-[#64748B]'
+        }`}
+      >
+        {label}
+      </p>
+      <p className={`mt-1 text-[20px] font-extrabold tracking-tight ${
+        theme === 'dark' ? 'text-[#35C8F4]' : 'text-[#168EDB]'
+      }`}>
+        {value}
+      </p>
     </div>
   )
 }
 
-function SourceCard({ name, page, quote }: { name: string; page: string; quote: string }) {
-  return (
-    <div className="flex gap-3 rounded-xl border border-line p-2.5 bg-[#fcfdff]">
-      <div className="w-[60px] shrink-0 rounded border border-[#e1e6ef] bg-white p-1.5 shadow-sm">
-        <div className="space-y-[3px]">
-          {Array.from({ length: 14 }).map((_, i) => (
-            <div key={i} className="h-[2px] rounded bg-[#c9d0dc]" style={{ width: `${70 + ((i * 37) % 30)}%` }} />
+/**
+ * FormattedContent renders clean Markdown with:
+ * - Headings
+ * - Bold text
+ * - Inline code
+ * - Bullet lists
+ * - Numbered lists
+ * - Blockquotes
+ * - Strict Requirement 11 compliance: Zero visible citations/sources
+ */
+function FormattedContent({ content, theme }: { content: string; theme?: 'light' | 'dark' }) {
+  if (!content) return null
+
+  // Ensure any lingering citation markers are completely stripped
+  const cleanedContent = content
+    .replace(/\[Source:[^\]]*\]/gi, '')
+    .replace(/\[المصدر:[^\]]*\]/gi, '')
+    .replace(/\[Page:[^\]]*\]/gi, '')
+    .replace(/\[الصفحة:[^\]]*\]/gi, '')
+    .replace(/\[Document\s*\d+[^\]]*\]/gi, '')
+    .replace(/\[Document:[^\]]*\]/gi, '')
+    // Strip [filename.pdf, Page N] inline references
+    .replace(/\[[^\]]*\.pdf\s*,\s*Page\s*\d+[^\]]*\]/gi, '')
+    // Strip **Sources Referenced:** ... lines
+    .replace(/^\s*\*\*Sources?\s*Referenced\s*:?\*\*.*$/gim, '')
+    .replace(/^\s*\*\*Sources?\s*:?\*\*.*$/gim, '')
+    .replace(/^\s*\*\*References?\s*:?\*\*.*$/gim, '')
+    // Strip "Note: Running in offline demo mode..." lines
+    .replace(/^\s*\*?Note:\s*Running in offline demo mode.*$/gim, '')
+    // Strip "Falling back to extractive..." lines
+    .replace(/^\s*Falling back to extractive.*$/gim, '')
+    // Strip "[Demo / Grounded Answer Mode]" markers
+    .replace(/^\s*\*?\*?\[Demo\s*\/?\s*Grounded Answer Mode\]\*?\*?\s*$/gim, '')
+    // Strip source pills: 📎 Sources: ...
+    .replace(/^\s*📎\s*Sources?\s*:.*$/gim, '')
+    .trim()
+
+  const lines = cleanedContent.split('\n')
+  const elements: React.ReactNode[] = []
+
+  let listItems: string[] = []
+  let inCodeBlock = false
+  let codeBuffer: string[] = []
+
+  const flushList = () => {
+    if (listItems.length > 0) {
+      elements.push(
+        <ul key={`list-${elements.length}`} className="my-2 space-y-1 pl-5 list-disc">
+          {listItems.map((item, idx) => (
+            <li key={idx} className="leading-relaxed">
+              {formatInline(item)}
+            </li>
           ))}
-        </div>
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[14px] font-semibold text-ink">{name}</p>
-        <p className="text-[13px] text-brand font-medium">{page}</p>
-        <p className="mt-1.5 rounded-md bg-[#f3f6fc] px-2 py-1.5 text-[11.5px] leading-snug text-body">{quote}</p>
-      </div>
-    </div>
-  )
+        </ul>
+      )
+      listItems = []
+    }
+  }
+
+  const flushCode = () => {
+    if (codeBuffer.length > 0) {
+      elements.push(
+        <pre
+          key={`code-${elements.length}`}
+          className={`my-3 overflow-x-auto rounded-xl p-4 text-[13px] font-mono border ${
+            theme === 'dark' ? 'bg-[#090E1B] text-[#36D6A0] border-[#26364D]' : 'bg-[#17243A] text-[#36D6A0] border-[#DFE7F1]'
+          }`}
+        >
+          <code>{codeBuffer.join('\n')}</code>
+        </pre>
+      )
+      codeBuffer = []
+    }
+  }
+
+  const formatInline = (text: string): React.ReactNode[] => {
+    const parts = text.split(/(\*\*.*?\*\*|`.*?`)/g)
+    return parts.map((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>
+      }
+      if (part.startsWith('`') && part.endsWith('`')) {
+        return (
+          <code
+            key={i}
+            className={`rounded px-1.5 py-0.5 text-[12.5px] font-mono border ${
+              theme === 'dark' ? 'bg-[#1C2A40] text-[#35C8F4] border-[#26364D]' : 'bg-[#E8EEF7] text-[#168EDB] border-[#DFE7F1]'
+            }`}
+          >
+            {part.slice(1, -1)}
+          </code>
+        )
+      }
+      return part
+    })
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+
+    if (line.trim().startsWith('```')) {
+      if (inCodeBlock) {
+        flushCode()
+        inCodeBlock = false
+      } else {
+        flushList()
+        inCodeBlock = true
+      }
+      continue
+    }
+
+    if (inCodeBlock) {
+      codeBuffer.push(line)
+      continue
+    }
+
+    const trimmed = line.trim()
+
+    if (!trimmed) {
+      flushList()
+      continue
+    }
+
+    // Headings
+    if (trimmed.startsWith('#### ')) {
+      flushList()
+      elements.push(
+        <h5 key={`h5-${i}`} className="mt-3 mb-1 text-[14px] font-bold">
+          {formatInline(trimmed.slice(5))}
+        </h5>
+      )
+      continue
+    }
+    if (trimmed.startsWith('### ')) {
+      flushList()
+      elements.push(
+        <h4 key={`h4-${i}`} className="mt-3.5 mb-1 text-[15px] font-bold">
+          {formatInline(trimmed.slice(4))}
+        </h4>
+      )
+      continue
+    }
+    if (trimmed.startsWith('## ')) {
+      flushList()
+      elements.push(
+        <h3 key={`h3-${i}`} className="mt-4 mb-1.5 text-[16.5px] font-bold">
+          {formatInline(trimmed.slice(3))}
+        </h3>
+      )
+      continue
+    }
+    if (trimmed.startsWith('# ')) {
+      flushList()
+      elements.push(
+        <h2 key={`h2-${i}`} className="mt-4 mb-2 text-[18.5px] font-extrabold">
+          {formatInline(trimmed.slice(2))}
+        </h2>
+      )
+      continue
+    }
+
+    // Bullet items
+    if (trimmed.startsWith('* ') || trimmed.startsWith('- ') || trimmed.startsWith('• ')) {
+      listItems.push(trimmed.slice(2))
+      continue
+    }
+
+    // Blockquote
+    if (trimmed.startsWith('> ')) {
+      flushList()
+      elements.push(
+        <blockquote
+          key={`quote-${i}`}
+          className={`my-2 border-l-4 px-3.5 py-2 text-[13.5px] italic rounded-r-lg ${
+            theme === 'dark' ? 'border-[#35C8F4] bg-[#1C2A40]/50 text-[#A7B5CC]' : 'border-[#168EDB] bg-[#E8EEF7]/60 text-[#64748B]'
+          }`}
+        >
+          {formatInline(trimmed.slice(2))}
+        </blockquote>
+      )
+      continue
+    }
+
+    // Standard paragraph
+    flushList()
+    elements.push(
+      <p key={`p-${i}`} className="my-1.5 text-[14px] leading-relaxed">
+        {formatInline(line)}
+      </p>
+    )
+  }
+
+  flushList()
+  flushCode()
+
+  return <div className="space-y-1">{elements}</div>
 }

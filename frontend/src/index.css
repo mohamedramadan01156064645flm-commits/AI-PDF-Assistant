@@ -1,28 +1,274 @@
 /* @import url() FONT IMPORTS MUST ALWAYS BE AT THE VERY TOP OF THIS FILE, ABOVE THE TAILWIND IMPORT — DO NOT DELETE THIS COMMENT */
-@import url('https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Manrope:wght@500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
 /* CRITICAL: THE FOLLOWING TAILWIND IMPORT MUST NEVER BE DELETED — DO NOT DELETE THIS COMMENT */
 @import 'tailwindcss';
 /* END TAILWIND IMPORTS — ALL OTHER CSS MUST GO BELOW THIS LINE */
 
 @theme {
-  --font-sans: 'Figtree', ui-sans-serif, system-ui, sans-serif;
-  --color-navy: #0f1a33;
-  --color-navy-2: #16244a;
-  --color-navy-active: #1d3a7a;
-  --color-ink: #0f1d3d;
-  --color-body: #2a3550;
-  --color-muted: #64708a;
-  --color-brand: #1a56db;
-  --color-brand-soft: #e6eeff;
-  --color-violet: #4f2fc4;
-  --color-violet-soft: #ece8ff;
-  --color-canvas: #f1f5fd;
-  --color-line: #e3e9f5;
-  --color-bubble: #dfe8fb;
-  --color-success: #22a35a;
-  --color-success-soft: #e8f8ee;
+  --font-sans: 'Inter', 'Manrope', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  
+  /* Midnight Aurora Dark Tokens */
+  --color-aurora-bg: #090E1B;
+  --color-aurora-sidebar: #0D1424;
+  --color-aurora-card: #111B2E;
+  --color-aurora-elevated: #1C2A40;
+  --color-aurora-border: #26364D;
+  --color-aurora-cyan: #35C8F4;
+  --color-aurora-violet: #9875FF;
+  --color-aurora-mint: #36D6A0;
+  --color-aurora-text: #F5F7FF;
+  --color-aurora-muted: #A7B5CC;
+
+  /* Midnight Aurora Light Tokens */
+  --color-aurora-light-bg: #F5F8FC;
+  --color-aurora-light-sidebar: #FFFFFF;
+  --color-aurora-light-card: #FFFFFF;
+  --color-aurora-light-elevated: #E8EEF7;
+  --color-aurora-light-border: #DFE7F1;
+  --color-aurora-light-cyan: #168EDB;
+  --color-aurora-light-violet: #8060E8;
+  --color-aurora-light-text: #17243A;
+  --color-aurora-light-muted: #64748B;
 }
 
-html, body, #root { height: 100%; }
-body { font-family: var(--font-sans); }
+:root {
+  --app-bg: #F5F8FC;
+  --sidebar-bg: #FFFFFF;
+  --card-bg: #FFFFFF;
+  --elevated-bg: #E8EEF7;
+  --border-color: #DFE7F1;
+  --text-primary: #17243A;
+  --text-secondary: #64748B;
+  --accent-cyan: #168EDB;
+  --accent-violet: #8060E8;
+  --accent-mint: #10B981;
+}
+
+.dark {
+  --app-bg: #090E1B;
+  --sidebar-bg: #0D1424;
+  --card-bg: #111B2E;
+  --elevated-bg: #1C2A40;
+  --border-color: #26364D;
+  --text-primary: #F5F7FF;
+  --text-secondary: #A7B5CC;
+  --accent-cyan: #35C8F4;
+  --accent-violet: #9875FF;
+  --accent-mint: #36D6A0;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--app-bg);
+  color: var(--text-primary);
+  transition: background-color 0.25s cubic-bezier(0.4, 0, 0.2, 1), color 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(167, 181, 204, 0.25);
+  border-radius: 9999px;
+}
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(38, 54, 77, 0.8);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(53, 200, 244, 0.5);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   ANIMATIONS & AURORA GLOWS
+   ───────────────────────────────────────────────────────────── */
+
+@keyframes scanBeam {
+  0% {
+    top: 0%;
+    opacity: 0.85;
+  }
+  50% {
+    top: calc(100% - 4px);
+    opacity: 1;
+  }
+  100% {
+    top: 0%;
+    opacity: 0.85;
+  }
+}
+
+.animate-scan-beam {
+  animation: scanBeam 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes scanPulse {
+  0%, 100% { opacity: 0.2; }
+  50% { opacity: 0.6; }
+}
+
+.animate-scan-pulse {
+  animation: scanPulse 1.8s ease-in-out infinite;
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-modal-in {
+  animation: modalIn 0.22s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes auroraShimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.aurora-gradient-text {
+  background: linear-gradient(135deg, #35C8F4 0%, #9875FF 50%, #36D6A0 100%);
+  background-size: 200% 200%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: auroraShimmer 6s ease infinite;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   PREMIUM 3D BUTTONS (MIDNIGHT AURORA DESIGN SYSTEM)
+   ───────────────────────────────────────────────────────────── */
+
+/* Primary Aurora 3D Button (Electric Cyan to AI Violet) */
+.btn-3d-aurora,
+.btn-3d-blue {
+  position: relative;
+  background: linear-gradient(135deg, #35C8F4 0%, #7E56E2 100%);
+  box-shadow: 0 4px 0 #4f2fb5, 0 8px 22px rgba(53, 200, 244, 0.32);
+  transition: all 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: translateY(0);
+}
+.btn-3d-aurora:hover,
+.btn-3d-blue:hover {
+  background: linear-gradient(135deg, #4bd5ff 0%, #8f6cf0 100%);
+  box-shadow: 0 5px 0 #4f2fb5, 0 12px 28px rgba(53, 200, 244, 0.42);
+  transform: translateY(-1px);
+}
+.btn-3d-aurora:active,
+.btn-3d-blue:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 #4f2fb5, 0 4px 12px rgba(53, 200, 244, 0.25);
+}
+
+/* Secondary 3D Button - AI Violet (PDF Export / Special AI Action) */
+.btn-3d-purple,
+.btn-3d-violet {
+  position: relative;
+  background: linear-gradient(135deg, #9875FF 0%, #7445E8 100%);
+  box-shadow: 0 4px 0 #4c28a8, 0 8px 22px rgba(152, 117, 255, 0.35);
+  transition: all 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: translateY(0);
+}
+.btn-3d-purple:hover,
+.btn-3d-violet:hover {
+  background: linear-gradient(135deg, #ab8eff 0%, #7445E8 100%);
+  box-shadow: 0 5px 0 #4c28a8, 0 12px 28px rgba(152, 117, 255, 0.45);
+  transform: translateY(-1px);
+}
+.btn-3d-purple:active,
+.btn-3d-violet:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 #4c28a8, 0 4px 10px rgba(152, 117, 255, 0.25);
+}
+
+/* Success 3D Button - Soft Mint Green */
+.btn-3d-emerald,
+.btn-3d-mint {
+  position: relative;
+  background: linear-gradient(135deg, #36D6A0 0%, #10B981 100%);
+  box-shadow: 0 4px 0 #047857, 0 8px 20px rgba(54, 214, 160, 0.32);
+  transition: all 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: translateY(0);
+}
+.btn-3d-emerald:hover,
+.btn-3d-mint:hover {
+  background: linear-gradient(135deg, #4ee3b0 0%, #10B981 100%);
+  box-shadow: 0 5px 0 #047857, 0 12px 26px rgba(54, 214, 160, 0.42);
+  transform: translateY(-1px);
+}
+.btn-3d-emerald:active,
+.btn-3d-mint:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 #047857, 0 4px 10px rgba(54, 214, 160, 0.22);
+}
+
+/* Destructive 3D Button - Refined Crimson */
+.btn-3d-red {
+  position: relative;
+  background: linear-gradient(180deg, #F43F5E 0%, #E11D48 100%);
+  box-shadow: 0 4px 0 #9F1239, 0 8px 20px rgba(244, 63, 94, 0.32);
+  transition: all 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: translateY(0);
+}
+.btn-3d-red:hover {
+  background: linear-gradient(180deg, #FB7185 0%, #E11D48 100%);
+  box-shadow: 0 5px 0 #9F1239, 0 12px 26px rgba(244, 63, 94, 0.42);
+  transform: translateY(-1px);
+}
+.btn-3d-red:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 #9F1239, 0 4px 10px rgba(244, 63, 94, 0.22);
+}
+
+/* Secondary Elevated 3D Button - Midnight Slate */
+.btn-3d-slate {
+  position: relative;
+  background: linear-gradient(180deg, #1C2A40 0%, #142033 100%);
+  border: 1px solid #26364D;
+  box-shadow: 0 4px 0 #0D1424, 0 8px 18px rgba(9, 14, 27, 0.45);
+  transition: all 0.14s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform: translateY(0);
+}
+.btn-3d-slate:hover {
+  background: linear-gradient(180deg, #243550 0%, #162438 100%);
+  border-color: #35C8F4;
+  box-shadow: 0 5px 0 #0D1424, 0 10px 22px rgba(53, 200, 244, 0.2);
+  transform: translateY(-1px);
+}
+.btn-3d-slate:active {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 #0D1424, 0 4px 8px rgba(9, 14, 27, 0.3);
+}
+
+/* Accessibility: Respect Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

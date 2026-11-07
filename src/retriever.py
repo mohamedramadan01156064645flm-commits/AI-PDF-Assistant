@@ -65,9 +65,12 @@ class PDFRetriever:
 
         where_clause = {"source": source_filter} if source_filter else None
 
+        # Fetch slightly more chunks if multiple documents are indexed to allow balanced multi-doc representation
+        fetch_k = max(k * 2, 8) if not source_filter else k
+
         raw_results = self.vector_store.query_similarity(
             query=query,
-            n_results=k,
+            n_results=fetch_k,
             where_filter=where_clause,
         )
 
@@ -91,7 +94,48 @@ class PDFRetriever:
                 )
             )
 
+        # Re-rank to ensure top_k limit, while prioritizing diversity across documents if multiple exist
+        if len(retrieved) > k:
+            # If multiple sources are present in retrieved, ensure fair representation
+            unique_sources = set(c.source for c in retrieved)
+            if len(unique_sources) > 1 and not source_filter:
+                balanced: List[RetrievedChunk] = []
+                by_source: Dict[str, List[RetrievedChunk]] = {}
+                for c in retrieved:
+                    by_source.setdefault(c.source, []).append(c)
+
+                # Round-robin top chunks per source
+                max_per_src = max(1, k // len(unique_sources) + 1)
+                for src, s_chunks in by_source.items():
+                    balanced.extend(s_chunks[:max_per_src])
+
+                # Sort balanced by similarity
+                balanced.sort(key=lambda x: x.similarity, reverse=True)
+                return balanced[:k]
+
+            return retrieved[:k]
+
         return retrieved
+
+    def retrieve_for_comparison(
+        self,
+        sources: List[str],
+        query: str,
+        chunks_per_source: int = 3,
+    ) -> Dict[str, List[RetrievedChunk]]:
+        """
+        Retrieves top relevant chunks separately for each specified document to enable high-fidelity cross-document comparison.
+        """
+        results_by_doc: Dict[str, List[RetrievedChunk]] = {}
+        for src in sources:
+            chunks = self.retrieve(
+                query=query,
+                top_k=chunks_per_source,
+                similarity_threshold=self.default_threshold,
+                source_filter=src,
+            )
+            results_by_doc[src] = chunks
+        return results_by_doc
 
     @staticmethod
     def format_context_for_prompt(chunks: List[RetrievedChunk]) -> str:

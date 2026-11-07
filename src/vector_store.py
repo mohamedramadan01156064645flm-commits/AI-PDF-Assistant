@@ -29,10 +29,24 @@ class ChromaVectorStore:
             settings=Settings(anonymized_telemetry=False, allow_reset=True),
         )
 
-        self.collection = self.client.get_or_create_collection(
+        self._collection = None
+
+    @property
+    def collection(self):
+        """Dynamically get or recover collection handle to avoid stale references."""
+        if self._collection is not None:
+            try:
+                # Test whether current handle is still valid
+                self._collection.count()
+                return self._collection
+            except Exception:
+                self._collection = None
+
+        self._collection = self.client.get_or_create_collection(
             name=self.collection_name,
             metadata={"description": "AI PDF Assistant Document Store"},
         )
+        return self._collection
 
     def add_chunks(self, chunks: List[TextChunk]) -> int:
         """
@@ -122,6 +136,30 @@ class ChromaVectorStore:
                     sources.add(m["source"])
         return sorted(list(sources))
 
+    def get_chunks_by_source(self, source_name: str, limit: int = 15) -> List[Dict[str, Any]]:
+        """Retrieves raw chunks for a specific document without semantic similarity filtering."""
+        if self.count() == 0:
+            return []
+        try:
+            data = self.collection.get(
+                where={"source": source_name},
+                limit=limit,
+                include=["documents", "metadatas"],
+            )
+            chunks = []
+            if data and data.get("documents"):
+                for doc, meta in zip(data["documents"], data["metadatas"]):
+                    chunks.append(
+                        {
+                            "content": doc,
+                            "metadata": meta,
+                            "similarity": 1.0,
+                        }
+                    )
+            return chunks
+        except Exception:
+            return []
+
     def delete_source(self, source_name: str) -> None:
         """Deletes all chunks belonging to a specific file."""
         self.collection.delete(where={"source": source_name})
@@ -132,8 +170,12 @@ class ChromaVectorStore:
 
     def reset(self) -> None:
         """Clears all entries from the collection."""
-        self.client.delete_collection(name=self.collection_name)
-        self.collection = self.client.get_or_create_collection(
+        try:
+            self.client.delete_collection(name=self.collection_name)
+        except Exception:
+            pass
+        self._collection = None
+        self._collection = self.client.get_or_create_collection(
             name=self.collection_name,
             metadata={"description": "AI PDF Assistant Document Store"},
         )
